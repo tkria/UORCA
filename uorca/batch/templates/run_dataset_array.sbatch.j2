@@ -47,7 +47,7 @@ apptainer exec \
   $SIF \
   bash -lc "\
     cd /workspace && \
-    uv run python uorca/analysis/master.py \
+    uv run python -m uorca.graph.runner \
       --accession $accession \
       --output_dir /UORCA_results \
       --resource_dir {{ resource_dir }} \

@@ -8,7 +8,7 @@ Key features:
 - Automatic API rate limiting based on API key presence
 - Parallel processing for efficient data retrieval
 - Dataset-level validation with RNA-seq criteria
-- AI-powered clustering and relevance scoring (enabled by default)
+- AI-powered relevance scoring (enabled by default)
 - Multi-dataset CSV output for batch analysis (enabled by default)
 
 Requirements:
@@ -21,7 +21,7 @@ Workflow:
 2. Fetch complete dataset information using esummary v2.0
 3. Retrieve SRA metadata for validation
 4. Validate datasets based on RNA-seq criteria (>3 paired-end transcriptomic samples)
-5. Cluster valid datasets and assess relevance using AI
+5. Assess relevance of valid datasets using AI
 6. Generate results CSV and batch analysis input
 
 Usage:
@@ -31,6 +31,15 @@ Usage:
 import argparse
 import asyncio
 import datetime
+
+# Allow nested event loops: assess_subbatch is async and runs inside
+# asyncio.gather(...), but call_structured uses pydantic-ai's agent.run_sync
+# which tries to start a new event loop. Without nest_asyncio every batch
+# fails with "This event loop is already running" and falls back to default
+# scores. nest-asyncio is already a project runtime dep.
+import nest_asyncio
+nest_asyncio.apply()
+
 import io
 import json
 import logging
@@ -39,6 +48,7 @@ import statistics
 import sys
 import threading
 import time
+import traceback
 import warnings
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,59 +58,82 @@ from typing import Any, Dict, List, Optional, Tuple
 from functools import partial
 from tqdm import tqdm
 
-import numpy as np
 import pandas as pd
 import requests
 from Bio import Entrez
 from dotenv import load_dotenv
-from openai import OpenAI
+import GEOparse as gp
 from pydantic import BaseModel
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-from tqdm import tqdm
 
 # Load environment variables
 load_dotenv()
 
 # Configure Entrez with explicit key setting
+def _validate_entrez_api_key(api_key: str, email: str) -> bool:
+    """
+    Validate NCBI Entrez API key by making a test request.
+
+    Some environments (e.g., HPC clusters behind firewalls) may cause API key
+    authentication to fail with HTTP 400, even if the key is valid elsewhere.
+
+    Returns:
+        True if API key is valid and working, False otherwise.
+    """
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+
+    base_url = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi'
+    params = {
+        'email': email,
+        'api_key': api_key,
+        'retmode': 'json'
+    }
+
+    url = base_url + '?' + urllib.parse.urlencode(params)
+
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            return resp.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            try:
+                response_body = e.read().decode('utf-8')
+                if 'api-key' in response_body.lower() or 'invalid' in response_body.lower():
+                    return False
+            except Exception:
+                pass
+        return False
+    except Exception:
+        return False
+
+
 def _configure_entrez():
-    """Configure Entrez with current environment variables."""
-    if os.getenv("ENTREZ_EMAIL"):
-        Entrez.email = os.getenv("ENTREZ_EMAIL")
-    if os.getenv("ENTREZ_API_KEY"):
-        Entrez.api_key = os.getenv("ENTREZ_API_KEY")
-        # Verify it was set
-        if not hasattr(Entrez, 'api_key') or not Entrez.api_key:
-            logging.warning("Failed to set Entrez.api_key - NCBI rate limiting may not work as expected")
+    """Configure Entrez with current environment variables, validating API key."""
+    email = os.getenv("ENTREZ_EMAIL", "")
+    if email:
+        Entrez.email = email
+
+    api_key = os.getenv("ENTREZ_API_KEY")
+    if api_key:
+        # Validate API key before using it
+        if _validate_entrez_api_key(api_key, email):
+            Entrez.api_key = api_key
+            logging.info("NCBI Entrez API key validated successfully")
+        else:
+            # API key is invalid in this environment - disable it
+            Entrez.api_key = None
+            os.environ.pop("ENTREZ_API_KEY", None)  # Remove from environment
+            logging.warning(
+                "NCBI Entrez API key validation failed (HTTP 400: API key invalid). "
+                "This can happen on HPC clusters or behind certain firewalls. "
+                "Falling back to unauthenticated access with slower rate limits."
+            )
     else:
-        # Explicitly set to None if not available
         Entrez.api_key = None
 
 # Initial configuration at module load
 _configure_entrez()
-
-# OpenAI client initialization with validation
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    logging.error("❌ OPENAI_API_KEY not found in environment variables")
-    logging.error("🔧 Dataset identification requires OpenAI API key for AI-powered relevance assessment")
-    logging.error("📝 Please add OPENAI_API_KEY=sk-proj-your-key-here to your .env file")
-    logging.error("🔗 Get your API key at: https://platform.openai.com/api-keys")
-    raise EnvironmentError(
-        "OPENAI_API_KEY is required for dataset identification. "
-        "Please set this environment variable in your .env file."
-    )
-
-try:
-    client = OpenAI(api_key=openai_api_key)
-    # Test the client with a minimal request to validate the key
-    logging.info("✅ OpenAI API key validated successfully")
-except Exception as e:
-    logging.error(f"❌ Failed to initialize OpenAI client: {e}")
-    logging.error("🔧 Please check that your OPENAI_API_KEY is valid")
-    logging.error("🔗 Verify your API key at: https://platform.openai.com/api-keys")
-    raise EnvironmentError(f"Failed to initialize OpenAI client: {e}")
 
 # Rate limiting for API calls
 class APIRateLimiter:
@@ -135,7 +168,6 @@ api_rate_limiter = APIRateLimiter()
 
 # Constants
 MAX_RETRIES = 3
-EMBEDDING_MODEL = "text-embedding-3-small"
 
 # Configure logging
 def setup_logging(verbose: bool = False, suppress_sra_warnings: bool = True) -> None:
@@ -261,22 +293,19 @@ class Assessment(BaseModel):
 class Assessments(BaseModel):
     assessments: List[Assessment]
 
-def call_openai_json(prompt: str, user_input: str, response_format: BaseModel, model: str = "gpt-5-mini") -> Any:
-    """Make OpenAI API call with JSON response format."""
-    response = client.beta.chat.completions.parse(
-        model=model,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_input}
-        ],
-        response_format=response_format
-    )
-    return response.choices[0].message.parsed
+def call_structured(prompt: str, user_input: str, output_type: type) -> Any:
+    """Make a structured LLM call using the configured provider."""
+    from pydantic_ai import Agent
+    from uorca.ai_provider import get_model
 
-def extract_terms(research_query: str, model: str = "gpt-5-mini") -> ExtractedTerms:
+    agent = Agent(get_model(), output_type=output_type, system_prompt=prompt)
+    result = agent.run_sync(user_input)
+    return result.output
+
+def extract_terms(research_query: str) -> ExtractedTerms:
     """Extract search terms from research query."""
     prompt = load_prompt("prompts/dataset_identification/extract_terms.txt")
-    return call_openai_json(prompt, research_query, ExtractedTerms, model)
+    return call_structured(prompt, research_query, ExtractedTerms)
 
 def perform_search(term: str, max_results: int = 2000) -> List[str]:
     """Search GEO database for a single term with RNA-seq filter."""
@@ -444,168 +473,459 @@ def calculate_dataset_sizes_from_runinfo(sra_df: pd.DataFrame) -> Dict[str, int]
     return dataset_sizes
 
 
+# ============================================================
+# Metadata snapshot & PubMed enrichment for assessment
+# ============================================================
 
+def fetch_metadata_snapshot(accession: str) -> Optional[str]:
+    """
+    Fetch GEO sample metadata via GEOparse and return a compact snapshot.
 
-def get_embedding(text: str) -> List[float]:
-    """Get embedding for text using OpenAI API."""
+    The snapshot shows only informative columns: constant columns (same value
+    for all samples) and all-unique columns (likely identifiers) are removed.
+    Multiple runs per sample are collapsed to one row per biological sample.
+
+    Returns a human-readable string summary, or None on failure.
+    """
     try:
-        response = client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=text
-        )
-        return response.data[0].embedding
+        import subprocess
+
+        # Download SOFT file manually (GEOparse's download can fail on some systems)
+        cache_dir = Path("/tmp/uorca_geo_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        base_part = accession[3:-3] + "nnn"
+        url = f"https://ftp.ncbi.nlm.nih.gov/geo/series/GSE{base_part}/{accession}/soft/{accession}_family.soft.gz"
+        filepath = cache_dir / f"{accession}_family.soft.gz"
+
+        if not filepath.exists():
+            subprocess.run(
+                ["curl", "-fsSL", "-o", str(filepath), url],
+                check=True, timeout=60, capture_output=True,
+            )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            gse = gp.get_GEO(filepath=str(filepath), silent=True)
+
+        meta = gse.phenotype_data.reset_index().rename(columns={"index": "GSM"})
+
+        if meta.empty:
+            return None
+
+        # Remove identifier columns
+        id_cols = ["GSM", "geo_accession"]
+        meta = meta.drop(columns=[c for c in id_cols if c in meta.columns], errors="ignore")
+
+        # Deduplicate rows (collapse multiple runs per sample)
+        meta = meta.drop_duplicates()
+
+        # Remove columns where all values are identical (uninformative)
+        meta = meta.loc[:, meta.nunique() > 1]
+
+        if meta.empty:
+            return "No variable metadata columns found across samples."
+
+        # Remove columns where all values are unique (likely identifiers)
+        unique_cols = [c for c in meta.columns if meta[c].nunique() == len(meta)]
+        meta = meta.drop(columns=unique_cols)
+
+        if meta.empty:
+            return "No informative metadata columns found (all columns are either constant or unique per sample)."
+
+        # Build compact summary: column -> unique values
+        lines = [f"Samples: {len(meta)}"]
+        for col in meta.columns:
+            unique_vals = meta[col].dropna().unique().tolist()
+            # Count occurrences for values that appear
+            val_counts = meta[col].value_counts()
+            if len(unique_vals) <= 10:
+                val_summary = ", ".join(
+                    f"{v} (n={val_counts.get(v, 0)})" for v in unique_vals
+                )
+            else:
+                # Too many values — show first 5 with counts
+                top_vals = val_counts.head(5)
+                val_summary = ", ".join(
+                    f"{v} (n={c})" for v, c in top_vals.items()
+                )
+                val_summary += f", ... ({len(unique_vals)} unique values total)"
+            lines.append(f"  {col}: {val_summary}")
+
+        return "\n".join(lines)
+
     except Exception as e:
-        logging.warning(f"Error getting embedding: {e}")
-        return [0.0] * 1536  # Default embedding size
+        logging.debug(f"Failed to fetch metadata snapshot for {accession}: {e}")
+        return None
 
-def embed_datasets(datasets_df: pd.DataFrame) -> pd.DataFrame:
-    """Generate embeddings for datasets."""
-    embeddings = []
 
-    # Use progress bar for embedding generation (disable if not main thread)
+def fetch_pubmed_abstract(pubmed_id: str) -> Optional[str]:
+    """Fetch a PubMed abstract via Entrez efetch. Returns abstract text or None."""
+    if not pubmed_id or pd.isna(pubmed_id):
+        return None
+    try:
+        api_rate_limiter.wait()
+        handle = Entrez.efetch(db="pubmed", id=str(int(float(pubmed_id))),
+                               rettype="abstract", retmode="text")
+        text = handle.read()
+        handle.close()
+        if isinstance(text, bytes):
+            text = text.decode("utf-8")
+        # Strip header lines, keep just the abstract body
+        text = text.strip()
+        return text if len(text) > 50 else None
+    except Exception as e:
+        logging.debug(f"Failed to fetch PubMed abstract for {pubmed_id}: {e}")
+        return None
+
+
+def enrich_representatives(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enrich representative datasets with metadata snapshots and PubMed abstracts.
+    Called before AI scoring so the scorer has richer context.
+    """
+    logging.info(f"Enriching {len(df)} representative datasets with metadata and PubMed abstracts...")
+
+    metadata_snapshots = {}
+    pubmed_abstracts = {}
+
+    workers = 4 if os.getenv("ENTREZ_API_KEY") else 1
     is_main_thread = threading.current_thread() is threading.main_thread()
-    for _, row in tqdm(datasets_df.iterrows(), total=len(datasets_df), desc="Generating embeddings", unit="dataset", disable=not is_main_thread):
-        # Combine title and summary for embedding
-        text = f"{row.get('Title', '')} {row.get('Summary', '')}"
-        embedding = get_embedding(text)
-        embeddings.append(embedding)
 
-        time.sleep(0.1)  # Small delay for API rate limiting
+    # Fetch metadata snapshots in parallel
+    with ThreadPoolExecutor(max_workers=workers) as executor, \
+         tqdm(total=len(df), desc="Fetching sample metadata", unit="dataset", disable=not is_main_thread) as pbar:
 
-    # Add embeddings to dataframe
-    datasets_df = datasets_df.copy()
-    datasets_df['embedding'] = embeddings
+        futures = {}
+        for _, row in df.iterrows():
+            acc = row.get("Accession") or row.get("ID")
+            if acc:
+                futures[executor.submit(fetch_metadata_snapshot, acc)] = acc
 
-    return datasets_df
+        for future in as_completed(futures):
+            acc = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    metadata_snapshots[acc] = result
+            except Exception as e:
+                logging.debug(f"Metadata snapshot failed for {acc}: {e}")
+            pbar.update(1)
 
-def cluster_datasets(datasets_df: pd.DataFrame, n_clusters: int = None, cluster_divisor: int = 10) -> pd.DataFrame:
-    """Cluster datasets based on embeddings with simple divisor-based cluster count."""
-    if len(datasets_df) <= 1:
-        datasets_df = datasets_df.copy()
-        datasets_df['Cluster'] = 0
-        return datasets_df
+    # Fetch PubMed abstracts in parallel
+    pubmed_ids = df[df["PrimaryPubMedID"].notna()]["PrimaryPubMedID"].unique()
+    if len(pubmed_ids) > 0:
+        logging.info(f"Fetching {len(pubmed_ids)} PubMed abstracts...")
 
-    if n_clusters is None:
-        n_clusters = max(1, len(datasets_df) // cluster_divisor)  # Simple: total/divisor
+        # Build accession -> pubmed_id mapping
+        acc_to_pmid = {}
+        for _, row in df.iterrows():
+            acc = row.get("Accession") or row.get("ID")
+            pmid = row.get("PrimaryPubMedID")
+            if acc and pmid and pd.notna(pmid):
+                acc_to_pmid[acc] = pmid
 
-    logging.info(f"Clustering {len(datasets_df)} datasets into {n_clusters} clusters...")
+        with ThreadPoolExecutor(max_workers=workers) as executor, \
+             tqdm(total=len(acc_to_pmid), desc="Fetching PubMed abstracts", unit="abstract", disable=not is_main_thread) as pbar:
 
-    # Prepare embeddings
-    embeddings = np.array(datasets_df['embedding'].tolist())
+            futures = {}
+            for acc, pmid in acc_to_pmid.items():
+                futures[executor.submit(fetch_pubmed_abstract, pmid)] = acc
 
-    # Standardize embeddings
-    scaler = StandardScaler()
-    embeddings_scaled = scaler.fit_transform(embeddings)
+            for future in as_completed(futures):
+                acc = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        pubmed_abstracts[acc] = result
+                except Exception as e:
+                    logging.debug(f"PubMed abstract failed for {acc}: {e}")
+                pbar.update(1)
 
-    # Perform clustering
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    clusters = kmeans.fit_predict(embeddings_scaled)
+    # Add columns to DataFrame
+    df = df.copy()
+    df["MetadataSnapshot"] = df.apply(
+        lambda row: metadata_snapshots.get(row.get("Accession") or row.get("ID")),
+        axis=1
+    )
+    df["PubMedAbstract"] = df.apply(
+        lambda row: pubmed_abstracts.get(row.get("Accession") or row.get("ID")),
+        axis=1
+    )
 
-    # Add cluster labels
-    datasets_df = datasets_df.copy()
-    datasets_df['Cluster'] = clusters
+    n_meta = sum(1 for v in metadata_snapshots.values() if v)
+    n_abs = len(pubmed_abstracts)
+    logging.info(f"Enrichment complete: {n_meta}/{len(df)} metadata snapshots, {n_abs}/{len(df)} PubMed abstracts")
 
-    return datasets_df
-
-def select_representative_datasets(datasets_df: pd.DataFrame, max_assess: int = 300) -> pd.DataFrame:
-    """Select datasets for assessment with budget constraint, distributed proportionally across clusters."""
-    n_clusters = datasets_df['Cluster'].nunique()
-
-    if len(datasets_df) <= max_assess:
-        logging.info(f"Assessing all {len(datasets_df)} datasets (within budget of {max_assess})")
-        return datasets_df  # Assess all if within budget
-
-    # Distribute assessment budget proportionally across clusters
-    datasets_per_cluster = max(1, max_assess // n_clusters)
-
-    logging.info(f"Selecting up to {datasets_per_cluster} datasets from each of {n_clusters} clusters (budget: {max_assess})")
-
-    representatives = []
-    total_selected = 0
-
-    for cluster_id in sorted(datasets_df['Cluster'].unique()):
-        cluster_datasets = datasets_df[datasets_df['Cluster'] == cluster_id]
-        n_to_take = min(datasets_per_cluster, len(cluster_datasets))
-        cluster_representatives = cluster_datasets.head(n_to_take)
-        representatives.extend(cluster_representatives.to_dict('records'))
-        total_selected += n_to_take
-
-    logging.info(f"Selected {total_selected} total datasets for relevance assessment")
-    return pd.DataFrame(representatives).reset_index(drop=True)
+    return df
 
 
-async def assess_subbatch(df: pd.DataFrame, query: str, schema, key: str, rep: int, idx: int, total_batches: int, sem: asyncio.Semaphore, model: str) -> List[Assessment]:
-    """Assess a subbatch of datasets."""
+async def assess_subbatch(
+    df: pd.DataFrame, query: str, schema, key: str,
+    rep: int, idx: int, total_batches: int, sem: asyncio.Semaphore,
+    *,
+    stage: str,
+    stage1_biology_threshold: int,
+    context: str = "",
+) -> List:
+    """Assess a sub-batch of datasets at the given pipeline stage.
+
+    stage="stage1": loads the biology-only prompt, expects BiologyAssessments.
+    stage="stage2": loads the biology+design prompt, expects RelevanceAssessments.
+    On any exception, returns one default fallback assessment per input row
+    (loud-errors policy: log a warning, do not silently drop the batch).
+    """
+    from uorca.identification.scoring import (
+        BiologyAssessment,
+        BiologyAssessments,
+        RelevanceAssessment,
+        RelevanceAssessments,
+    )
+
     async with sem:
         try:
-            # Prepare data for assessment
+            # Build the per-stage assessment data
             assessment_data = []
             for _, row in df.iterrows():
-                assessment_data.append({
-                    "ID": row['ID'],
-                    "Species": row.get('Species', 'Unknown'),
-                    "Tissue": "Unknown",
-                    "Technique": row.get('Technique', 'RNA-seq'),
-                    "Summary": row.get('Summary', '')
-                })
+                entry = {
+                    "ID": row["ID"],
+                    "Title": row.get("Title", ""),
+                    "Species": row.get("Species", "Unknown"),
+                    "NumSamples": int(row["NumSamples"]) if pd.notna(row.get("NumSamples")) else 0,
+                    "Summary": row.get("Summary", ""),
+                }
+                if stage == "stage2":
+                    snapshot = row.get("MetadataSnapshot")
+                    if pd.notna(snapshot) and snapshot:
+                        entry["SampleMetadata"] = snapshot
+                    abstract = row.get("PubMedAbstract")
+                    if pd.notna(abstract) and abstract:
+                        entry["PubMedAbstract"] = abstract
+                assessment_data.append(entry)
 
-            prompt = load_prompt("prompts/dataset_identification/assess_relevance.txt")
-            user_input = f"Research Query: {query}\n\nDatasets:\n{json.dumps(assessment_data, indent=2)}"
+            # Load examples once and substitute into the prompt
+            examples = load_prompt("prompts/dataset_identification/scoring_examples.txt")
+            biology_examples_marker = "{biology_examples}"
+            design_examples_marker = "{design_examples}"
 
-            assessments = call_openai_json(prompt, user_input, Assessments, model)
+            # Split the examples file at the design marker. Everything before
+            # the design marker (after biology marker) is biology examples.
+            if biology_examples_marker in examples and design_examples_marker in examples:
+                bio_start = examples.index(biology_examples_marker) + len(biology_examples_marker)
+                des_start = examples.index(design_examples_marker)
+                biology_text = examples[bio_start:des_start].strip()
+                design_text = examples[des_start + len(design_examples_marker):].strip()
+            else:
+                biology_text = examples
+                design_text = examples
+
+            if stage == "stage1":
+                prompt = load_prompt("prompts/dataset_identification/assess_biology_stage1.txt")
+                prompt = prompt.replace("{biology_examples}", biology_text)
+                prompt = prompt.replace("{threshold}", str(stage1_biology_threshold))
+                output_type = BiologyAssessments
+            else:
+                prompt = load_prompt("prompts/dataset_identification/assess_relevance_stage2.txt")
+                prompt = prompt.replace("{biology_examples}", biology_text)
+                prompt = prompt.replace("{design_examples}", design_text)
+                output_type = RelevanceAssessments
+
+            context_block = ""
+            if stage == "stage2" and context.strip():
+                context_block = (
+                    f"\n\nAdditional Context (user-provided guidance for scoring): "
+                    f"{context.strip()}"
+                )
+            user_input = (
+                f"Research Query: {query}{context_block}\n\n"
+                f"Datasets:\n{json.dumps(assessment_data, indent=2)}"
+            )
+
+            assessments = call_structured(prompt, user_input, output_type)
             return assessments.assessments
         except Exception as e:
-            logging.warning(f"Error in assessment batch {idx+1}/{total_batches} (rep {rep+1}): {e}")
-            # Return default assessments
-            return [Assessment(ID=row['ID'], RelevanceScore=5, Justification="Assessment failed") for _, row in df.iterrows()]
+            logging.warning(
+                f"Error in assessment batch {idx+1}/{total_batches} (rep {rep+1}, stage={stage}): {e}"
+            )
+            # Fallback: one default assessment per row, loud not silent.
+            if stage == "stage1":
+                return [
+                    BiologyAssessment(
+                        ID=row["ID"], BiologyScore=5,
+                        BiologyJustification="Assessment failed",
+                    )
+                    for _, row in df.iterrows()
+                ]
+            return [
+                RelevanceAssessment(
+                    ID=row["ID"], BiologyScore=5, DesignScore=5,
+                    BiologyJustification="Assessment failed",
+                    DesignJustification="Assessment failed",
+                )
+                for _, row in df.iterrows()
+            ]
 
-async def repeated_relevance(df: pd.DataFrame, query: str, repeats: int = 3, batch_size: int = 10, openai_api_jobs: int = 3, model: str = "gpt-5-mini") -> pd.DataFrame:
-    """Perform repeated relevance assessment with averaging."""
-    logging.info(f"Starting relevance scoring: {repeats} repetitions, batch size {batch_size}, parallel API jobs: {openai_api_jobs}")
+async def repeated_relevance(
+    df: pd.DataFrame, query: str,
+    repeats: int = 3, batch_size: int = 10, openai_api_jobs: int = 3,
+    *,
+    stage: str,
+    stage1_biology_threshold: int,
+    context: str = "",
+) -> pd.DataFrame:
+    """Run repeated relevance assessments and return per-axis aggregated scores.
+
+    For stage="stage1": columns are ID, BiologyScore (mean), Run{N}BiologyScore,
+    Run{N}BiologyJustification.
+    For stage="stage2": columns are ID, BiologyScore, DesignScore (means),
+    plus per-round Run{N}BiologyScore/DesignScore/BiologyJustification/DesignJustification.
+    """
+    logging.info(
+        f"Starting {stage} relevance scoring: {repeats} reps, batch size {batch_size}, "
+        f"parallel API jobs: {openai_api_jobs}"
+    )
     sem = asyncio.Semaphore(openai_api_jobs)
 
-    # create sub-batches
-    batches = [df.iloc[i:i+batch_size] for i in range(0, len(df), batch_size)]
+    batches = [df.iloc[i:i + batch_size] for i in range(0, len(df), batch_size)]
     total_batches = len(batches)
     total_tasks = repeats * total_batches
 
-    # Create tasks with progress tracking
-    logging.info(f"Processing {total_tasks} assessment batches...")
-
     async def assess_with_progress(rep, idx, sub, pbar):
-        """Wrapper to update progress bar when task completes."""
-        result = await assess_subbatch(sub, query, None, "assessments", rep, idx, total_batches, sem, model)
+        result = await assess_subbatch(
+            sub, query, None, "assessments", rep, idx, total_batches, sem,
+            stage=stage, stage1_biology_threshold=stage1_biology_threshold,
+            context=context,
+        )
         pbar.update(1)
         pbar.set_postfix({"Rep": f"{rep+1}/{repeats}", "Batch": f"{(idx+1)+rep*total_batches}/{total_tasks}"})
         return result
 
     is_main_thread = threading.current_thread() is threading.main_thread()
-    with tqdm(total=total_tasks, desc="Assessing dataset relevance", unit="batch", disable=not is_main_thread) as pbar:
+    with tqdm(total=total_tasks, desc=f"Assessing relevance ({stage})", unit="batch", disable=not is_main_thread) as pbar:
         tasks = []
         for rep in range(repeats):
             for idx, sub in enumerate(batches):
                 tasks.append(assess_with_progress(rep, idx, sub, pbar))
-
-        # Execute all tasks and gather results
         all_results = await asyncio.gather(*tasks)
 
-    # flatten and aggregate
+    # Aggregate per axis
     coll: Dict[str, Dict[str, Any]] = {}
     for result in all_results:
         for a in result:
-            entry = coll.setdefault(a.ID, {'scores': [], 'justifications': []})
-            entry['scores'].append(a.RelevanceScore)
-            entry['justifications'].append(a.Justification)
+            entry = coll.setdefault(a.ID, {
+                "biology_scores": [], "biology_justifications": [],
+                "design_scores": [], "design_justifications": [],
+            })
+            entry["biology_scores"].append(a.BiologyScore)
+            entry["biology_justifications"].append(a.BiologyJustification)
+            if stage == "stage2":
+                entry["design_scores"].append(a.DesignScore)
+                entry["design_justifications"].append(a.DesignJustification)
 
     records: List[Dict[str, Any]] = []
     for id_, v in coll.items():
-        rec = {'ID': id_, 'RelevanceScore': round(statistics.mean(v['scores']), 2)}
-        for i, (score, just) in enumerate(zip(v['scores'], v['justifications']), 1):
-            rec[f'Run{i}Score'] = score
-            rec[f'Run{i}Justification'] = just
+        rec: Dict[str, Any] = {"ID": id_}
+        # Mean BiologyScore
+        rec["BiologyScore"] = round(statistics.mean(v["biology_scores"]), 2)
+        for i, (score, just) in enumerate(zip(v["biology_scores"], v["biology_justifications"]), 1):
+            rec[f"Run{i}BiologyScore"] = score
+            rec[f"Run{i}BiologyJustification"] = just
+        if stage == "stage2":
+            rec["DesignScore"] = round(statistics.mean(v["design_scores"]), 2)
+            for i, (score, just) in enumerate(zip(v["design_scores"], v["design_justifications"]), 1):
+                rec[f"Run{i}DesignScore"] = score
+                rec[f"Run{i}DesignJustification"] = just
+        # The last-round justifications are useful as the "headline" reasoning
+        rec["BiologyJustification"] = v["biology_justifications"][-1] if v["biology_justifications"] else ""
+        if stage == "stage2":
+            rec["DesignJustification"] = v["design_justifications"][-1] if v["design_justifications"] else ""
         records.append(rec)
 
     return pd.DataFrame(records)
+
+
+def build_identification_metadata(
+    *,
+    research_query: str,
+    search_terms,
+    start_time,
+    end_time,
+    total_datasets_assessed: int,
+    datasets_deemed_relevant: int,
+    threshold: float,
+) -> dict:
+    """Build the identification_metadata.json payload for a completed run.
+
+    ``search_terms`` are LLM-generated and vary between runs on the same query,
+    so they are recorded here to keep the output directory self-describing —
+    otherwise the only copy lives in the run log, outside the results.
+
+    They arrive as a set, so they are sorted for a stable, diffable record and
+    to keep the payload JSON-serialisable.
+    """
+    return {
+        "input_query": research_query,
+        "search_terms": sorted(search_terms),
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+        "total_datasets_assessed": total_datasets_assessed,
+        "datasets_deemed_relevant": datasets_deemed_relevant,
+        "threshold_used": threshold,
+    }
+
+
+def build_theme_map_for_finished_run(output_dir: Path | str) -> bool:
+    """Build the theme map for a finished identification run, and never fail the run.
+
+    This is the **one** call site of ``build_theme_map`` that does not re-raise, and the
+    exception is deliberate. Spec section 7 says every theme-map failure raises; spec
+    decision 4 says the build sits at the very end of the run so it "can never cost a
+    completed 60-minute run". Both cannot hold literally in the same place: the
+    identification work has already succeeded and its results are already on disk, so
+    letting an embedding, clustering or naming failure propagate would turn a successful
+    hour of work into a non-zero exit.
+
+    The resolution, approved with the design: log the failure at ERROR level with the
+    full traceback, and record it in ``theme_map/FAILED.txt`` so the Identify page shows
+    it loudly and offers a rebuild. Nothing is swallowed — it is written down in two
+    places — but the identification run still exits clean.
+
+    The other two callers (``python -m uorca.identification.theme_map`` and the GUI
+    button) raise normally. Do not add a catch there.
+
+    Returns:
+        True when the map was built, False when the failure was recorded instead.
+    """
+    from uorca.identification import theme_map
+
+    try:
+        theme_map.build_theme_map(output_dir)
+    except Exception as exc:
+        logging.error(
+            "Theme map build failed for %s. The identification run itself succeeded and "
+            "its results are complete; the map can be rebuilt from the Identify page. "
+            "%s: %s\n%s",
+            output_dir,
+            type(exc).__name__,
+            exc,
+            traceback.format_exc(),
+        )
+        try:
+            theme_map.write_failure(output_dir, f"{type(exc).__name__}: {exc}")
+        except Exception as record_exc:
+            # Recording the failure must not be what finally sinks a completed run.
+            # The real failure is already in the log above; this second line says the
+            # panel will not be able to show it.
+            logging.error(
+                "The theme map failure for %s could not be recorded in FAILED.txt: "
+                "%s: %s",
+                output_dir,
+                type(record_exc).__name__,
+                record_exc,
+            )
+        return False
+
+    logging.info("Theme map built for %s", output_dir)
+    return True
 
 
 def main():
@@ -616,10 +936,8 @@ def main():
     1. Extract search terms from research query
     2. Search GEO database for relevant datasets
     3. Validate datasets for RNA-seq compatibility
-    4. Cluster valid datasets (count = total_datasets / cluster_divisor)
-    5. Select representative datasets for assessment (budget distributed across clusters)
-    6. Assess relevance of representatives using AI
-    7. Generate comprehensive results CSV (all datasets) and batch analysis CSV (filtered)
+    4. Assess relevance of representatives using AI
+    5. Generate comprehensive results CSV (all datasets) and batch analysis CSV (filtered)
     """
     parser = argparse.ArgumentParser(
         description='Identify and evaluate relevant RNA-seq datasets from GEO for a biological research query',
@@ -639,23 +957,44 @@ def main():
     search_group = parser.add_argument_group('Search Options', 'Control dataset search and evaluation')
     search_group.add_argument('-m', '--max-per-term', type=int, default=500,
                              help='Maximum datasets to retrieve per search term')
-    search_group.add_argument('-a', '--max-assess', type=int, default=300,
-                             help='Maximum number of datasets to assess for relevance (distributed across clusters)')
+    search_group.add_argument('-n', '--num-assess', type=int, default=300,
+                             help='Number of datasets to assess for relevance')
 
     # === Advanced Parameters ===
     advanced_group = parser.add_argument_group('Advanced Options', 'Fine-tune algorithm behavior (expert users)')
-    advanced_group.add_argument('--cluster-divisor', type=int, default=10,
-                               help='Divisor for cluster count (total_datasets / divisor). Smaller values = more clusters.')
     advanced_group.add_argument('-r', '--rounds', type=int, default=3,
                                help='Number of independent relevance scoring rounds for reliability')
     advanced_group.add_argument('-b', '--batch-size', type=int, default=20,
                                help='Datasets per AI evaluation batch (affects memory usage)')
-    advanced_group.add_argument('--model', type=str, default='gpt-5-mini',
-                                   help='OpenAI model to use for relevance assessment')
     advanced_group.add_argument('-v', '--verbose', action='store_true',
                                help='Enable verbose logging (DEBUG level)')
 
+    # === Scoring Parameters ===
+    scoring_group = parser.add_argument_group(
+        'Scoring Options',
+        'Tune the relevance scoring derivation and Stage 1→2 gating',
+    )
+    scoring_group.add_argument('--biology-weight', type=float, default=0.8,
+                               help='Weight on BiologyScore in RelevanceScore (default 0.8)')
+    scoring_group.add_argument('--design-min', type=int, default=0,
+                               help='Hard cap on RelevanceScore when DesignScore < design_min (default 0 = no cap)')
+    scoring_group.add_argument('--stage1-biology-threshold', type=int, default=3,
+                               help='Stage 1 BiologyScore threshold to graduate to Stage 2 (default 3)')
+    scoring_group.add_argument('--library-source', type=str, default='bulk',
+                               choices=['bulk', 'sc', 'both'],
+                               help='Library source filter for validity check')
+    scoring_group.add_argument('--context', type=str, default='',
+                               help='Extra user-provided guidance fed into the Stage 2 scoring prompt')
+
     args = parser.parse_args()
+
+    # Range validation (loud-error on out-of-range values)
+    if not (0.0 <= args.biology_weight <= 1.0):
+        parser.error("--biology-weight must be in [0.0, 1.0]")
+    if not (0 <= args.design_min <= 10):
+        parser.error("--design-min must be in [0, 10]")
+    if not (0 <= args.stage1_biology_threshold <= 10):
+        parser.error("--stage1-biology-threshold must be in [0, 10]")
 
     # Check for required email (Entrez guidelines)
     if not os.getenv("ENTREZ_EMAIL"):
@@ -701,7 +1040,7 @@ def main():
     try:
         # Step 1: Extract terms from research query
         logging.info("Determining search terms...")
-        terms = extract_terms(research_query, args.model)
+        terms = extract_terms(research_query)
 
         # Step 2: Search GEO database
         search_terms = set(terms.extracted_terms + terms.expanded_terms)
@@ -837,6 +1176,14 @@ def main():
         # Step 6: Validate ALL datasets based on complete SRA criteria (dataset-level validation)
         validation_data = []
 
+        # Determine which LibrarySource values count as valid for this run
+        if args.library_source == 'bulk':
+            accepted_sources = {'TRANSCRIPTOMIC'}
+        elif args.library_source == 'sc':
+            accepted_sources = {'TRANSCRIPTOMIC SINGLE CELL'}
+        else:  # both
+            accepted_sources = {'TRANSCRIPTOMIC', 'TRANSCRIPTOMIC SINGLE CELL'}
+
         # Group by dataset (GSE ID) for proper dataset-level validation
         grouped_datasets = list(final_results.groupby('ID'))
         is_main_thread = threading.current_thread() is threading.main_thread()
@@ -865,7 +1212,7 @@ def main():
                     lib_strategies.add(lib_strategy)
 
                 # Check if this sample meets RNA-seq criteria
-                if (pd.notna(lib_source) and lib_source == 'TRANSCRIPTOMIC' and
+                if (pd.notna(lib_source) and lib_source in accepted_sources and
                     pd.notna(lib_strategy) and lib_strategy == 'RNA-Seq' and
                     pd.notna(lib_layout) and lib_layout == 'PAIRED'):
                     rnaseq_samples += 1
@@ -875,9 +1222,13 @@ def main():
                 valid = False
                 reason = "No SRA metadata available"
             elif rnaseq_samples == 0:
+                accepted_sources_str = '/'.join(sorted(accepted_sources))
                 reason_parts = []
-                if 'TRANSCRIPTOMIC' not in lib_sources:
-                    reason_parts.append(f"LibrarySource: {'/'.join(lib_sources) if lib_sources else 'None'}")
+                if not (lib_sources & accepted_sources):
+                    reason_parts.append(
+                        f"LibrarySource: {'/'.join(lib_sources) if lib_sources else 'None'} "
+                        f"(accepted: {accepted_sources_str})"
+                    )
                 if 'RNA-Seq' not in lib_strategies:
                     reason_parts.append(f"LibraryStrategy: {'/'.join(lib_strategies) if lib_strategies else 'None'}")
                 if 'PAIRED' not in lib_layouts:
@@ -941,27 +1292,115 @@ def main():
         logging.info(f"Found {len(valid_datasets_df)} valid datasets and {len(invalid_datasets_df)} invalid datasets")
 
         if len(valid_datasets_df) == 0:
-            logging.error("No valid datasets found - cannot proceed with clustering/relevance assessment")
+            logging.error("No valid datasets found - cannot proceed with relevance assessment")
             # Still output all datasets for transparency
             final_results = pd.concat([valid_datasets_df, invalid_datasets_df], ignore_index=True)
         else:
-            # Step 8: Embed and cluster valid datasets
-            logging.info(f"Embedding {len(valid_datasets_df)} valid datasets...")
-            embedded_df = embed_datasets(valid_datasets_df)
+            n_valid = len(valid_datasets_df)
 
-            logging.info("Clustering valid datasets...")
-            clustered_df = cluster_datasets(embedded_df, cluster_divisor=args.cluster_divisor)
+            # ============================================================
+            # TWO-STAGE SCORING
+            # Stage 1: Lightweight score ALL valid datasets (Title+Summary, 1 round)
+            # Stage 2: Full enriched score on top 20% from Stage 1
+            # ============================================================
 
-            # Step 9: Select representative datasets
-            logging.info("Selecting representative datasets for assessment...")
-            representatives_df = select_representative_datasets(clustered_df, args.max_assess)
+            # Step 8: Stage 1 — Lightweight relevance scoring of ALL valid datasets
+            logging.info(f"Stage 1: Lightweight scoring of all {n_valid} valid datasets (1 round, Title+Summary only)...")
+            stage1_df = asyncio.run(repeated_relevance(
+                valid_datasets_df, research_query,
+                repeats=1, batch_size=args.batch_size,
+                openai_api_jobs=4,
+                stage="stage1",
+                stage1_biology_threshold=args.stage1_biology_threshold,
+            ))
 
-            # Step 10: Assess relevance of representatives
-            logging.info(f"Assessing relevance of {len(representatives_df)} representative datasets...")
-            assessed_df = asyncio.run(repeated_relevance(representatives_df, research_query, repeats=args.rounds, batch_size=args.batch_size, openai_api_jobs=4, model=args.model))
+            # Merge Stage 1 scores back. Stage 1 returns BiologyScore, BiologyJustification,
+            # Run1BiologyScore, Run1BiologyJustification — rename to Stage1* for clarity.
+            valid_with_stage1 = valid_datasets_df.merge(
+                stage1_df.rename(columns={
+                    "BiologyScore": "Stage1BiologyScore",
+                    "BiologyJustification": "Stage1BiologyJustification",
+                }),
+                on='ID', how='left',
+            )
+            # Drop the per-round Run* columns from Stage 1 (we only ran 1 round; the Stage1*
+            # columns we just renamed carry the data we want).
+            extra_cols = [c for c in valid_with_stage1.columns
+                          if c.startswith("Run1") and "Stage1" not in c]
+            valid_with_stage1 = valid_with_stage1.drop(columns=extra_cols, errors="ignore")
 
-            # Step 11: Merge assessment results back to valid datasets
-            valid_with_scores = valid_datasets_df.merge(assessed_df, on='ID', how='left')
+            # Threshold-based gate: any dataset with BiologyScore >= threshold graduates
+            scored_mask = valid_with_stage1['Stage1BiologyScore'].notna()
+            scored_datasets = valid_with_stage1[scored_mask].copy()
+            stage2_candidates = scored_datasets[
+                scored_datasets['Stage1BiologyScore'] >= args.stage1_biology_threshold
+            ].copy()
+            n_graduated = len(stage2_candidates)
+
+            logging.info(
+                f"Stage 1 complete: {len(scored_datasets)} scored; "
+                f"{n_graduated} datasets graduated to Stage 2 "
+                f"(threshold = BiologyScore >= {args.stage1_biology_threshold})"
+            )
+
+            if n_graduated == 0:
+                logging.info(
+                    f"0 datasets graduated to Stage 2. "
+                    "Consider lowering --stage1-biology-threshold."
+                )
+
+            # Log Stage 1 score distribution
+            if len(scored_datasets) > 0:
+                logging.info(f"Stage 1 BiologyScore distribution: "
+                             f"mean={scored_datasets['Stage1BiologyScore'].mean():.2f}, "
+                             f"median={scored_datasets['Stage1BiologyScore'].median():.2f}, "
+                             f"max={scored_datasets['Stage1BiologyScore'].max():.2f}, "
+                             f">=5: {len(scored_datasets[scored_datasets['Stage1BiologyScore'] >= 5])}, "
+                             f">=3: {len(scored_datasets[scored_datasets['Stage1BiologyScore'] >= 3])}")
+
+            # Step 9: Stage 2 — Enrich top candidates with metadata + PubMed
+            logging.info(f"Stage 2: Enriching {len(stage2_candidates)} candidates with sample metadata and PubMed abstracts...")
+            stage2_candidates = enrich_representatives(stage2_candidates)
+
+            # Step 10: Stage 2 — Full relevance scoring (3 rounds, enriched)
+            logging.info(f"Stage 2: Full scoring of {len(stage2_candidates)} enriched candidates ({args.rounds} rounds)...")
+            stage2_assessed_df = asyncio.run(repeated_relevance(
+                stage2_candidates, research_query,
+                repeats=args.rounds, batch_size=args.batch_size,
+                openai_api_jobs=4,
+                stage="stage2",
+                stage1_biology_threshold=args.stage1_biology_threshold,
+                context=args.context,
+            ))
+
+            # Merge Stage 2 per-axis scores back. Stage 2 columns: BiologyScore, DesignScore,
+            # BiologyJustification, DesignJustification, Run{N}* — all flow into valid_with_scores.
+            valid_with_scores = valid_with_stage1.merge(
+                stage2_assessed_df, on='ID', how='left',
+            )
+
+            # Compute final RelevanceScore + Justification using the per-project
+            # derivation formulas. Stage-1-only rows (BiologyScore == NaN) get
+            # RelevanceScore = Stage1BiologyScore.
+            from uorca.identification.scoring import (
+                row_justification, row_relevance,
+            )
+
+            valid_with_scores["RelevanceScore"] = valid_with_scores.apply(
+                lambda row: row_relevance(
+                    row,
+                    biology_weight=args.biology_weight,
+                    design_min=args.design_min,
+                ),
+                axis=1,
+            )
+            valid_with_scores["Justification"] = valid_with_scores.apply(
+                lambda row: row_justification(row, design_min=args.design_min),
+                axis=1,
+            )
+
+            logging.info(f"Scoring complete: {len(stage2_candidates)} datasets fully assessed (Stage 2), "
+                         f"{n_valid} datasets screened (Stage 1)")
 
             # Combine valid (with scores) and invalid datasets for final output
             final_results = pd.concat([
@@ -973,9 +1412,9 @@ def main():
         # The threshold will be applied only to the batch_analysis_input.csv file
         logging.info(f"Main results will include all {len(final_results)} datasets (threshold applied only to batch analysis file)")
 
-        # Remove embedding column to prevent CSV malformation
-        if 'embedding' in final_results.columns:
-            final_results = final_results.drop('embedding', axis=1)
+        # Remove large/internal columns to prevent CSV malformation
+        drop_cols = ['embedding', 'MetadataSnapshot', 'PubMedAbstract']
+        final_results = final_results.drop(columns=[c for c in drop_cols if c in final_results.columns])
 
         # Create simplified final dataframe with only requested columns
         final = pd.DataFrame()
@@ -1001,8 +1440,20 @@ def main():
         final['Valid'] = final_results.get('valid_dataset', False).apply(lambda x: 'Yes' if x else 'No')
         final['Validation_Result'] = final_results.get('validation_reason', 'Unknown')
         final['DatasetSizeGB'] = final_results.get('DatasetSizeGB', 0.0)
-        final['RelevanceScore'] = final_results.get('RelevanceScore', None)
-        final['Justification'] = final_results.get('Run1Justification', None)
+        final["RelevanceScore"] = final_results.get("RelevanceScore", None)
+        final["Justification"] = final_results.get("Justification", None)
+        # Per-axis columns
+        final["BiologyScore"] = final_results.get("BiologyScore", None)
+        final["DesignScore"] = final_results.get("DesignScore", None)
+        final["BiologyJustification"] = final_results.get("BiologyJustification", None)
+        final["DesignJustification"] = final_results.get("DesignJustification", None)
+        final["Stage1BiologyScore"] = final_results.get("Stage1BiologyScore", None)
+        final["Stage1BiologyJustification"] = final_results.get("Stage1BiologyJustification", None)
+        for n in (1, 2, 3):
+            final[f"Run{n}BiologyScore"] = final_results.get(f"Run{n}BiologyScore", None)
+            final[f"Run{n}DesignScore"] = final_results.get(f"Run{n}DesignScore", None)
+            final[f"Run{n}BiologyJustification"] = final_results.get(f"Run{n}BiologyJustification", None)
+            final[f"Run{n}DesignJustification"] = final_results.get(f"Run{n}DesignJustification", None)
         final['PubMed_URL'] = final_results.get('PrimaryPubMedID').apply(create_pubmed_url)
         final['GEO_URL'] = final_results['ID'].apply(create_geo_url)
 
@@ -1047,9 +1498,6 @@ def main():
         logging.info(f"Invalid datasets: {len(final[final['Valid'] == 'No'])}")
         assessed_count = len(final.dropna(subset=['RelevanceScore']))
         logging.info(f"Assessed datasets: {assessed_count}")
-        not_assessed_count = len(final[final['Valid'] == 'Yes']) - assessed_count
-        if not_assessed_count > 0:
-            logging.info(f"Valid but not assessed: {not_assessed_count} (not selected as cluster representatives)")
 
         if args.threshold > 0:
             above_threshold_count = len(final[final['RelevanceScore'].notna() & (final['RelevanceScore'] >= args.threshold)])
@@ -1065,14 +1513,15 @@ def main():
         total_datasets_assessed = len(final.dropna(subset=['RelevanceScore'])) if 'RelevanceScore' in final.columns else 0
         datasets_deemed_relevant = len(final[final['RelevanceScore'].notna() & (final['RelevanceScore'] >= args.threshold)]) if 'RelevanceScore' in final.columns and args.threshold > 0 else 0
 
-        metadata = {
-            "input_query": research_query,
-            "start_time": start_time.isoformat(),
-            "end_time": end_time.isoformat(),
-            "total_datasets_assessed": total_datasets_assessed,
-            "datasets_deemed_relevant": datasets_deemed_relevant,
-            "threshold_used": args.threshold
-        }
+        metadata = build_identification_metadata(
+            research_query=research_query,
+            search_terms=search_terms,
+            start_time=start_time,
+            end_time=end_time,
+            total_datasets_assessed=total_datasets_assessed,
+            datasets_deemed_relevant=datasets_deemed_relevant,
+            threshold=args.threshold,
+        )
 
         # Save metadata JSON
         metadata_file = output_path / "identification_metadata.json"
@@ -1080,6 +1529,12 @@ def main():
             json.dump(metadata, f, indent=2)
 
         logging.info(f"Saved identification metadata to: {metadata_file}")
+
+        # Spec section 8: the theme map is the LAST block of the run, so it can never
+        # cost a completed 60-minute identification. See
+        # build_theme_map_for_finished_run for why this one call site records its
+        # failure instead of raising it (spec section 7 vs spec decision 4).
+        build_theme_map_for_finished_run(output_path)
 
     except Exception as e:
         logging.error(f"Error in main execution: {e}")

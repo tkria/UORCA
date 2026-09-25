@@ -73,7 +73,7 @@ def main():
         print(f"\n📋 Complete example .env file:")
         print(f"   # Required for dataset identification")
         print(f"   ENTREZ_EMAIL=researcher@university.edu")
-        print(f"   OPENAI_API_KEY=sk-proj-abc123...")
+        print(f"   OPENAI_API_KEY=<your-openai-api-key>")
         print(f"   # Optional but recommended")
         print(f"   ENTREZ_API_KEY=your_ncbi_key_here  # For 10x faster processing")
 

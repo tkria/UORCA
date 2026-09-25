@@ -4,6 +4,7 @@ Background task management for UORCA Streamlit app.
 Uses threading for non-blocking execution and SQLite for persistence.
 """
 
+import logging
 import sqlite3
 import threading
 import time
@@ -13,6 +14,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List
 import json
+
+logger = logging.getLogger(__name__)
 
 
 class TaskStatus(Enum):
@@ -172,6 +175,7 @@ class TaskManager:
 
             except Exception as e:
                 error_msg = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+                logger.exception("Task %s failed", task_id)
                 self._update_task_status(task_id, TaskStatus.FAILED, error=error_msg)
                 if on_error:
                     on_error(e)

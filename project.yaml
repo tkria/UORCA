@@ -1,0 +1,36 @@
+# Source of truth for stage-aware framework checks.
+framework_version: "6.4"
+toolkit_version: "1.5.0"
+name: "UORCA"
+objective: "Automate the identification, reanalysis and AI-assisted interpretation of public GEO RNA-seq datasets."
+owner: "Kevin Chen"
+stage: collaborative
+project_types:
+  - tool
+  - workflow
+  - agentic-ai
+  - analysis
+status: active
+visibility: public
+reuse_status: runnable
+data_sensitivity: public
+# SPDX identifier or "Proprietary"; empty means the licence decision is still open.
+license: "MIT"
+main_entry_point: "uv run uorca explore"
+validation_command: "uv run pytest"
+# GitHub metadata, completed by the framework skills after the repository exists.
+repository_url: "https://github.com/tkria/UORCA"
+project_registry_url: "https://github.com/tkria/translational-intelligence"
+mcp: not-applicable
+mcp_test_command: ""
+governance:
+  branch_protection_enabled: false
+  one_human_review_required: false
+release:
+  tag: ""
+  archive_status: planned
+  independent_reproduction:
+    completed: false
+    reviewer: ""
+    date: ""
+exceptions: []

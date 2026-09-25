@@ -53,12 +53,15 @@ RUN set -eux; \
     mkdir -p /root/.ncbi && \
     printf '/LIBS/GUID = "docker-build-guid"\nconfig/default = "true"\n' > /root/.ncbi/user-settings.mkfg
 
-# Install NCBI Entrez Direct (EDirect)
+# Install NCBI Entrez Direct (EDirect) to /opt/edirect (accessible by all users)
 RUN set -eux; \
-    echo ">>> Installing EDirect …"; \
-    sh -c "$(curl -fsSL https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/install-edirect.sh)"; \
-    find /root/edirect -maxdepth 1 -type f -perm -u+x -exec ln -sf {} /usr/local/bin/ \; ; \
-    /root/edirect/esearch -version | head -1
+    echo ">>> Installing EDirect to /opt/edirect …"; \
+    mkdir -p /opt/edirect; \
+    cd /opt/edirect; \
+    curl -fsSL https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/edirect.tar.gz | tar -xz --strip-components=1; \
+    chmod -R a+rX /opt/edirect; \
+    find /opt/edirect -maxdepth 1 -type f -perm -u+x -exec ln -sf {} /usr/local/bin/ \; ; \
+    esearch -version | head -1
 
 # Set up workspace and create proper venv
 WORKDIR /workspace
