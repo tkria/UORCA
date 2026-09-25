@@ -1,0 +1,16 @@
+# Managed by the TI research software framework. The validator runs centrally from
+# tkria/ti-research-software-framework@v1; compatible framework releases apply on the
+# next run without changing this file. Project-specific CI belongs in other workflows.
+name: framework-check
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  framework-check:
+    # Pull requests from forks cannot reach the private framework repository; they are skipped, not failed.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: tkria/ti-research-software-framework/.github/workflows/framework-check-reusable.yml@v1

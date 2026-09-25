@@ -1,0 +1,79 @@
+{biology_examples}
+======================================================================
+BIOLOGY EXAMPLES
+======================================================================
+
+Example A — score 10
+Query: "Differential expression in human cardiomyocytes under oxidative stress"
+Dataset:
+  Title: "RNA-seq of human iPSC-derived cardiomyocytes under H2O2-induced oxidative stress vs vehicle control"
+  Summary: "We profiled bulk RNA-seq from 16 iPSC-CM samples (8 H2O2, 8 vehicle) at 24h..."
+Score: 10
+Reasoning: Organism (human), tissue/cell type (iPSC-CMs), condition (oxidative stress) and assay (bulk RNA-seq) all explicitly named. Bullseye match.
+
+Example B — score 7
+Query: "Differential expression in human cardiomyocytes under oxidative stress"
+Dataset:
+  Title: "Transcriptomic profiling of mouse cardiomyocytes following hypoxia/reoxygenation"
+  Summary: "Bulk RNA-seq of primary mouse cardiomyocytes after 6h hypoxia followed by 24h reoxygenation..."
+Score: 7
+Reasoning: Tissue/cell match (cardiomyocytes), assay match (bulk RNA-seq), related condition (hypoxia/reoxygenation is a different oxidative stressor), but organism mismatch (mouse vs human).
+
+Example C — score 4
+Query: "Differential expression in human cardiomyocytes under oxidative stress"
+Dataset:
+  Title: "RNA-seq of human iPSC-derived hepatocytes treated with various drugs"
+  Summary: "We profiled drug-induced gene expression changes in iPSC-derived hepatocytes including paracetamol..."
+Score: 4
+Reasoning: Right organism, right model system class (iPSC-derived), but wrong tissue (hepatocytes) and wrong condition (drug treatment, not oxidative stress per se).
+
+Example D — score 3 (the "give benefit of the doubt" case)
+Query: "Differential expression in human cardiomyocytes under oxidative stress"
+Dataset:
+  Title: "RNA-seq of cardiomyocytes under various conditions"
+  Summary: "(short, generic; no specific stressor named)"
+Score: 3
+Reasoning: Title is too generic to determine condition match. "Cardiomyocytes" + "various conditions" — could include oxidative stress. Stage 2 will examine sample metadata to confirm. Score upward when in doubt.
+
+Example E — score 0
+Query: "Differential expression in human cardiomyocytes under oxidative stress"
+Dataset:
+  Title: "Plasmodium falciparum gene expression during erythrocyte invasion"
+  Summary: "We characterise the transcriptional program of malaria parasites during invasion..."
+Score: 0
+Reasoning: Wrong organism, wrong cell type, completely different domain. Confident negative.
+
+{design_examples}
+======================================================================
+DESIGN QUALITY EXAMPLES (Stage 2 only — requires SampleMetadata)
+======================================================================
+
+Example F — design 10
+SampleMetadata excerpt: "Samples: 24
+  characteristics_ch1.0.condition: H2O2 (n=12), vehicle (n=12)
+  characteristics_ch1.1.replicate: rep1 (n=8), rep2 (n=8), rep3 (n=8)"
+Score: 10
+Reasoning: 12 replicates per condition, balanced. Clear control. DEG-ready.
+
+Example G — design 7
+SampleMetadata excerpt: "Samples: 6
+  characteristics_ch1.0.condition: treated (n=3), control (n=3)"
+Score: 7
+Reasoning: n=3 per group with clear control. DEG technically possible but tight on power.
+
+Example H — design 4
+SampleMetadata excerpt: "Samples: 4
+  characteristics_ch1.0.condition: treated (n=2), control (n=2)"
+Score: 4
+Reasoning: n=2 per group. Below the rule-of-thumb DEG threshold (≥3 reps). Probably not DEG-usable.
+
+Example I — design 2
+SampleMetadata excerpt: "Samples: 12
+  characteristics_ch1.0.donor: D1 (n=1), D2 (n=1), ... D12 (n=1)"
+Score: 2
+Reasoning: 12 samples but no group structure derivable from metadata. Visualisation only.
+
+Example J — design 0
+SampleMetadata excerpt: "(empty)"
+Score: 0
+Reasoning: No sample metadata snapshot available; cannot judge design.

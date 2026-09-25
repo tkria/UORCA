@@ -247,7 +247,7 @@ class SlurmBatchProcessor(BatchProcessor):
             )
 
             # Write temporary script file
-            script_file = Path(output_dir) / f"temp_submit_{accession}.sbatch"
+            script_file = Path(output_dir) / f"{accession}_UORCA.sbatch"
             with open(script_file, 'w') as f:
                 f.write(script_content)
 
@@ -286,6 +286,175 @@ class SlurmBatchProcessor(BatchProcessor):
             print(f"    Exception submitting {accession}: {e}")
             return None
 
+    def submit_user_data_job(self, user_config_path: str) -> Optional[str]:
+        """
+        Submit a single SLURM job for user-provided FASTQ data.
+
+        Args:
+            user_config_path: Path to user data YAML config file
+
+        Returns:
+            Job ID if successful, None otherwise
+        """
+        from uorca.graph.config import load_config
+
+        # Load user config to get output directory
+        config = load_config(user_config_path)
+        output_dir = config.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        logs_dir = output_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get SLURM parameters from processor defaults
+        params = self.default_parameters
+
+        try:
+            # Generate SLURM script for user data
+            script_content = self._generate_user_data_slurm_script(
+                user_config_path=user_config_path,
+                output_dir=output_dir,
+                logs_dir=logs_dir,
+                **params
+            )
+
+            # Write temporary script file
+            assert config.user_data is not None, (
+                "submit_user_data_job called with a config whose mode is not 'user'"
+            )
+            # Derive a stable identity from the fastq_dir basename so concurrent or
+            # sequential submissions never overwrite each other's sbatch scripts.
+            identity = Path(config.user_data.fastq_dir).name or "user"
+            script_file = output_dir / f"temp_submit_user_data__{identity}.sbatch"
+            with open(script_file, 'w') as f:
+                f.write(script_content)
+
+            # Submit job
+            result = subprocess.run(
+                ['sbatch', str(script_file)],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            # Clean up script file
+            script_file.unlink(missing_ok=True)
+
+            if result.returncode == 0:
+                job_id = result.stdout.strip().split()[-1]
+                print(f"Job submitted successfully")
+                print(f"  Job ID: {job_id}")
+                print(f"  Logs: {logs_dir}")
+                print(f"\nMonitor with: squeue -j {job_id}")
+                return job_id
+            else:
+                print(f"Error submitting job: {result.stderr}")
+                return None
+
+        except Exception as e:
+            print(f"Exception submitting user data job: {e}")
+            return None
+
+    def _generate_user_data_slurm_script(self, user_config_path: str, output_dir: Path, logs_dir: Path, **params) -> str:
+        """
+        Generate SLURM script for user-provided data workflow.
+
+        Args:
+            user_config_path: Path to user data config file
+            output_dir: Output directory
+            logs_dir: Log files directory
+            **params: SLURM parameters
+
+        Returns:
+            Generated script content
+        """
+        from uorca.graph.config import load_config
+
+        current_dir = Path(__file__).parent
+        project_root = current_dir.parent.parent
+
+        # Resolve user config path to absolute
+        user_config_abs = Path(user_config_path).resolve()
+
+        # Load config to get all paths that need to be bind-mounted
+        config = load_config(user_config_path)
+
+        # Collect all unique directories that need to be bound
+        bind_paths = set()
+        bind_paths.add(str(project_root.resolve()))
+        bind_paths.add(str(config.output_dir.resolve()))
+        bind_paths.add(str(config.resource_dir.resolve()))
+
+        if config.user_data:
+            bind_paths.add(str(config.user_data.fastq_dir.resolve()))
+            bind_paths.add(str(config.user_data.metadata_path.parent.resolve()))
+
+        # Build bind mount string
+        bind_mounts = " \\\n      ".join(f"-B {p}:{p}" for p in sorted(bind_paths))
+
+        # Determine container settings
+        container_engine = params.get('container_engine', 'apptainer')
+        if container_engine == 'apptainer':
+            container_image = params.get('apptainer_image', './uorca_0.1.0.sif')
+            # Resolve container image path
+            container_image = str(Path(container_image).resolve())
+        else:
+            container_image = params.get('docker_image', 'kevingchen/uorca:0.1.0')
+
+        # Generate job name from config file
+        config_name = Path(user_config_path).stem.replace('_config', '').replace('_test', '')
+        job_name = f"uorca_{config_name}"[:40]  # SLURM job name limit
+
+        # Generate script content
+        script = f"""#!/usr/bin/env bash
+#SBATCH --job-name={job_name}
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task={params.get('cpus_per_task', 8)}
+#SBATCH --mem={params.get('memory', '16G')}
+#SBATCH --partition={params.get('partition', 'tki_agpdev')}
+#SBATCH --constraint="{params.get('constraint', 'icx')}"
+#SBATCH -t {params.get('time_limit', '6:00:00')}
+#SBATCH -o {logs_dir}/user_data.out
+#SBATCH -e {logs_dir}/user_data.err
+
+module load apptainer
+
+TEMP_DIR=$(pwd)/tmp_apptainer_userdata_$$
+mkdir -p ${{TEMP_DIR}}
+
+CONTAINER_IMAGE={container_image}
+
+echo "Current time: $(date)"
+echo "Running user-provided data workflow"
+echo "Config file: {user_config_abs}"
+echo "CPUs available: $SLURM_CPUS_PER_TASK"
+echo "Using temporary directory: ${{TEMP_DIR}}"
+
+# Bind-mounts for Apptainer (all paths from config)
+BIND="{bind_mounts} \\
+      -B ${{TEMP_DIR}}:/tmp"
+
+echo "[$(date)] Starting user data workflow via Apptainer"
+
+apptainer exec \\
+  $BIND \\
+  --tmpdir=${{TEMP_DIR}} \\
+  --cleanenv \\
+  --env SLURM_CPUS_PER_TASK="${{SLURM_CPUS_PER_TASK}}" \\
+  --env OPENAI_API_KEY="${{OPENAI_API_KEY}}" \\
+  --env ENTREZ_EMAIL="${{ENTREZ_EMAIL}}" \\
+  --env ENTREZ_API_KEY="${{ENTREZ_API_KEY}}" \\
+  --env LOGFIRE_IGNORE_NO_CONFIG=1 \\
+  $CONTAINER_IMAGE \\
+  bash -lc "cd {project_root.resolve()} && uv run python -m uorca.graph.runner --config {user_config_abs}"
+
+echo "[$(date)] Workflow complete."
+
+# Clean up
+rm -rf ${{TEMP_DIR}}
+"""
+        return script
+
     def _generate_slurm_script(self, accession: str, output_dir: str, logs_dir: Path, **params) -> str:
         """
         Generate SLURM script content from Jinja2 template.
@@ -302,6 +471,9 @@ class SlurmBatchProcessor(BatchProcessor):
         # Find template directory (now in uorca/batch/templates/)
         current_dir = Path(__file__).parent
         template_dir = current_dir / "templates"
+
+        # Determine project root (go up from uorca/batch/slurm.py to project root)
+        project_root = current_dir.parent.parent
 
         if not template_dir.exists():
             raise FileNotFoundError(f"Template directory not found: {template_dir}")

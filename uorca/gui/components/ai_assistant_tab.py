@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import json
 import asyncio
+import concurrent.futures
 import logging
 import time
 import streamlit as st
@@ -208,13 +209,13 @@ def render_ai_assistant_tab(ri: ResultsIntegrator, results_dir: str, selected_da
             ### Option 1: Environment Variable (Recommended)
             ```bash
             # Add to your .env file or shell environment
-            export OPENAI_API_KEY="your-api-key-here"
+            export OPENAI_API_KEY="<your-openai-api-key>"
             ```
 
             ### Option 2: Create .env file
             Create a `.env` file in your project directory:
             ```
-            OPENAI_API_KEY=your-api-key-here
+            OPENAI_API_KEY=<your-openai-api-key>
             ```
 
             ### Getting an API Key
@@ -301,6 +302,81 @@ def _render_streamlined_ai_workflow(ri: ResultsIntegrator, results_dir: str, sel
 
 
 @log_streamlit_agent
+def _build_analysis_prompt(
+    research_query: str,
+    selected_contrast_dicts: List[Dict],
+    enhanced: bool,
+) -> str:
+    """Build the per-run analysis prompt for the interpretation agent.
+
+    Args:
+        research_query: The user's research question.
+        selected_contrast_dicts: Contrasts to analyse.
+        enhanced: True when contrasts were narrowed by relevance selection.
+
+    The toolbox description must stay in step with the tools the MCP server
+    exposes (see uorca/gui/mcp_server/server_core.py) and with the system prompt
+    in uorca/gui/ai/prompts/ai_agent_analysis.txt. It deliberately describes what
+    each tool is *for* rather than prescribing an order: the agent is expected to
+    explore, repeat calls with different parameters, and follow its own leads.
+    """
+    budget = get_ai_agent_config().request_limit
+
+    tool_plan = f"""Your toolbox — use any of these, in any order, as many times as the evidence warrants:
+- get_most_common_genes() — genes recurring across contrasts; vary the thresholds and top_n to see how the signal behaves
+- filter_genes_by_contrast_sets() — genes specific to one group of contrasts versus another; try several groupings
+- calculate_expression_variability() — how consistently genes respond across contrasts
+- calculate_gene_correlation() — co-expression structure among candidate genes
+- get_gene_contrast_stats() — per-contrast detail for specific genes
+- summarise_contrast() — the overall picture for an individual contrast
+
+You have a budget of {budget} tool calls. Use it generously — this is a budget to spend,
+not to conserve. Work iteratively: form a hypothesis, test it with whichever tool answers
+it, and let each result decide your next call. Repeat tools with different parameters,
+thresholds, contrast groupings or gene sets whenever that would sharpen or challenge a
+finding. Follow up on anything surprising. Do not settle for a single pass: keep going
+until further calls stop changing your conclusions, then report what you found."""
+
+    if enhanced:
+        return f"""
+Research question: "{research_query}"
+
+I have intelligently selected the following {len(selected_contrast_dicts)} contrasts from a larger set based on relevance, diversity, and analytical value:
+
+{json.dumps(selected_contrast_dicts, indent=2)}
+
+These contrasts were chosen to provide:
+1. High relevance to the research question
+2. Diversity of biological contexts
+3. Appropriate controls and comparisons
+4. Maximum analytical power for comparative analysis
+
+Investigate this question as thoroughly as the data allows.
+
+{tool_plan}
+
+Choose thresholds yourself, and when you are done reporting, return:
+1. Key genes identified with their biological significance
+2. Patterns that distinguish different contrast categories
+3. A brief biological interpretation of the findings
+"""
+
+    return f"""
+Research question: "{research_query}"
+
+Available contrasts:
+{json.dumps(selected_contrast_dicts, indent=2)}
+
+Investigate this question as thoroughly as the data allows, choosing all thresholds yourself.
+
+{tool_plan}
+
+When you are done exploring, return:
+1) A structured summary showing the key genes identified for each contrast or gene set
+2) A brief 2-3 sentence biological interpretation explaining your rationale and what patterns you discovered.
+"""
+
+
 def _run_complete_ai_analysis(ri: ResultsIntegrator, results_dir: str, research_query: str, selected_datasets: List[str]):
     """Run the complete AI analysis workflow including contrast relevance and gene analysis."""
     # Add validation for empty research query
@@ -474,44 +550,16 @@ def _run_complete_ai_analysis(ri: ResultsIntegrator, results_dir: str, research_
 
                 # Enhanced prompt that leverages the selection
                 if CONTRAST_RELEVANCE_WITH_SELECTION_AVAILABLE and len(selected_contrast_dicts) <= 20:
-                    prompt = f"""
-Research question: "{research_query}"
-
-I have intelligently selected the following {len(selected_contrast_dicts)} contrasts from a larger set based on relevance, diversity, and analytical value:
-
-{json.dumps(selected_contrast_dicts, indent=2)}
-
-These contrasts were chosen to provide:
-1. High relevance to the research question
-2. Diversity of biological contexts
-3. Appropriate controls and comparisons
-4. Maximum analytical power for comparative analysis
-
-Please perform comprehensive analysis using your four tools:
-1. Use get_most_common_genes() to find genes frequently differentially expressed across these selected contrasts
-2. Use filter_genes_by_contrast_sets() to find genes specific to subsets of contrasts (e.g., treatment-specific vs control-specific)
-3. Use get_gene_contrast_stats() to drill into interesting genes
-4. Use summarise_contrast() to understand individual contrast patterns
-
-Choose reasonable thresholds and return:
-1. Key genes identified with their biological significance
-2. Patterns that distinguish different contrast categories
-3. A brief biological interpretation of the findings
-"""
+                    prompt = _build_analysis_prompt(
+                        research_query, selected_contrast_dicts, enhanced=True
+                    )
                     # Log the AI analysis prompt
                     logger.info(f"AI ANALYSIS PROMPT (Enhanced): Research question: '{research_query}' | Selected contrasts: {len(selected_contrast_dicts)} | Prompt length: {len(prompt)} chars")
                     logger.debug(f"Full AI analysis prompt:\n{prompt}")
                 else:
-                    prompt = f"""
-Research question: "{research_query}"
-
-Available contrasts:
-{json.dumps(selected_contrast_dicts, indent=2)}
-
-Please perform the analysis using your four tools, choose all thresholds reasonably, and return:
-1) A structured summary showing the key genes identified for each contrast or gene set
-2) A brief 2-3 sentence biological interpretation explaining your rationale and what patterns you discovered.
-"""
+                    prompt = _build_analysis_prompt(
+                        research_query, selected_contrast_dicts, enhanced=False
+                    )
                     # Log the AI analysis prompt
                     logger.info(f"AI ANALYSIS PROMPT (Fallback): Research question: '{research_query}' | Available contrasts: {len(selected_contrast_dicts)} | Prompt length: {len(prompt)} chars")
                     logger.debug(f"Full AI analysis prompt:\n{prompt}")
@@ -931,7 +979,6 @@ def _execute_ai_analysis(agent, prompt: str) -> Tuple[GeneAnalysisOutput, List[D
             loop = asyncio.get_running_loop()
             logger.info("AI EXECUTION: Running in existing event loop, using thread executor")
             # If we're in an existing loop, we need to run in a thread
-            import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(asyncio.run, run_analysis())
                 # Add progress monitoring for thread execution

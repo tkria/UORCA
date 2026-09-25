@@ -13,9 +13,10 @@ import os
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv, find_dotenv
+from uorca.batch.slurm import SlurmBatchProcessor
 
-def main():
-    """Main CLI entry point with subcommands."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build and return the UORCA argument parser tree."""
     parser = argparse.ArgumentParser(
         prog="uorca",
         description="UORCA - Unified Omics Reference Corpus of Analyses",
@@ -65,13 +66,24 @@ For more help on a specific command, use:
     identify_search = identify_parser.add_argument_group('Search Options', 'Control dataset search and evaluation')
     identify_search.add_argument('-m', '--max-per-term', type=int, default=500,
                                 help='Maximum datasets to retrieve per search term')
-    identify_search.add_argument('-a', '--max-assess', type=int, default=300,
-                                help='Maximum number of datasets to assess for relevance (distributed across clusters)')
+    identify_search.add_argument('-n', '--num-assess', type=int, default=300,
+                                help='Number of datasets to assess for relevance (distributed across diversity clusters)')
 
     # Advanced parameters for identify
     identify_advanced = identify_parser.add_argument_group('Advanced Options', 'Fine-tune algorithm behavior (expert users)')
-    identify_advanced.add_argument('--cluster-divisor', type=int, default=10,
-                                  help='Divisor for cluster count (total_datasets / divisor). Smaller values = more clusters.')
+    identify_advanced.add_argument('--biology-weight', type=float, default=0.8,
+                                  help='Weight applied to BiologyScore in RelevanceScore '
+                                       '(design weight = 1 - biology_weight). Range [0.0, 1.0].')
+    identify_advanced.add_argument('--design-min', type=int, default=0,
+                                  help='If >0, RelevanceScore is hard-capped at this value when '
+                                       'DesignScore < design_min. Range [0, 10]; 0 disables.')
+    identify_advanced.add_argument('--stage1-biology-threshold', type=int, default=3,
+                                  help='Minimum Stage 1 BiologyScore for a dataset to graduate '
+                                       'to Stage 2 enrichment + scoring. Range [0, 10].')
+    identify_advanced.add_argument('--library-source', type=str, default='bulk',
+                                  choices=['bulk', 'sc', 'both'],
+                                  help='Library source filter: "bulk" (TRANSCRIPTOMIC only), '
+                                       '"sc" (TRANSCRIPTOMIC SINGLE CELL only), or "both".')
     identify_advanced.add_argument('-r', '--rounds', type=int, default=3,
                                   help='Number of independent relevance scoring rounds for reliability')
     identify_advanced.add_argument('-b', '--batch-size', type=int, default=20,
@@ -117,16 +129,26 @@ Configuration:
 
 Example slurm_config.yaml:
   slurm:
-    partition: "tki_agpdev"
-    constraint: "clx"
+    partition: "your_partition"
+    constraint: "your_constraint"
     cpus_per_task: 12
     memory: "16G"
     time_limit: "6:00:00"
         """
     )
 
-    slurm_parser.add_argument("--input", required=True,
-                             help="Either a CSV file with dataset information (must have 'Accession' column) or a directory containing both CSV and identification metadata")
+    slurm_parser.add_argument(
+        "--input",
+        help="CSV file or directory with GEO accession info",
+    )
+    slurm_parser.add_argument(
+        "--user-config",
+        action="append",
+        default=[],
+        metavar="YAML",
+        dest="user_config",
+        help="User-data config YAML; repeat for multiple custom datasets",
+    )
     slurm_parser.add_argument("--config",
                              help="YAML configuration file for SLURM settings (default: slurm_config.yaml if exists)")
     slurm_parser.add_argument("--output_dir", default="../UORCA_results",
@@ -191,6 +213,15 @@ Example slurm_config.yaml:
 
     explore_parser.set_defaults(func=run_explore)
 
+    setattr(parser, "_uorca_run_parser", run_parser)  # exposed for main() error path
+
+    return parser
+
+
+def main():
+    """Main CLI entry point with subcommands."""
+    parser = _build_parser()
+
     # Parse arguments
     args = parser.parse_args()
 
@@ -201,7 +232,7 @@ Example slurm_config.yaml:
 
     # Special handling for run command without batch system
     if args.command == 'run' and not hasattr(args, 'batch_system') or (hasattr(args, 'batch_system') and not args.batch_system):
-        run_parser.print_help()
+        getattr(parser, "_uorca_run_parser").print_help()
         sys.exit(1)
 
     # Call the appropriate function
@@ -370,8 +401,7 @@ def run_identify(args):
     sys.argv.extend(['-o', args.output])
     sys.argv.extend(['-t', str(args.threshold)])
     sys.argv.extend(['-m', str(args.max_per_term)])
-    sys.argv.extend(['--cluster-divisor', str(args.cluster_divisor)])
-    sys.argv.extend(['-a', str(args.max_assess)])
+    sys.argv.extend(['-n', str(args.num_assess)])
     sys.argv.extend(['-r', str(args.rounds)])
     sys.argv.extend(['-b', str(args.batch_size)])
     sys.argv.extend(['--model', args.model])
@@ -383,50 +413,74 @@ def run_identify(args):
 
 
 def run_batch_slurm(args):
-    """Run batch processing using SLURM."""
-    from uorca.batch.slurm import SlurmBatchProcessor
-    from pathlib import Path
-
+    """Submit a SLURM batch run that may contain GEO accessions, custom
+    user datasets, or both."""
     print("Starting SLURM batch processing...")
-
-    # Load and validate environment variables
     _load_environment_variables()
-    _check_environment_requirements(require_openai=True)  # Pipeline needs OpenAI
-    
-    # Check for Kallisto indices
-    _check_kallisto_indices(args.resource_dir)
+    _check_environment_requirements(require_openai=True)
 
-    try:
-        # Handle config file auto-detection
-        config_file = args.config
-        if not config_file:
-            # Auto-detect slurm_config.yaml in current directory
-            default_config = Path("slurm_config.yaml")
-            if default_config.exists():
-                config_file = str(default_config)
-                print(f"Auto-detected config file: {config_file}")
+    geo_input = getattr(args, "input", None)
+    user_configs: list[str] = list(getattr(args, "user_config", []) or [])
 
-        # Initialize processor with config file
-        processor = SlurmBatchProcessor(config_file=config_file)
+    if not geo_input and not user_configs:
+        sys.stderr.write(
+            "error: must provide --input and/or --user-config (one or more)\n"
+        )
+        sys.exit(2)
 
-        # Prepare parameters - CLI args override config file settings
-        params = {
-            'max_parallel': args.max_parallel,
-            'max_storage_gb': args.max_storage_gb,
-            'cleanup': not args.no_cleanup,
-            'resource_dir': args.resource_dir
-        }
+    # Handle SLURM config file auto-detection
+    slurm_config_file = args.config
+    if not slurm_config_file:
+        default_config = Path("slurm_config.yaml")
+        if default_config.exists():
+            slurm_config_file = str(default_config)
+            print(f"Auto-detected SLURM config file: {slurm_config_file}")
 
-        # Submit jobs
-        jobs_submitted = processor.submit_datasets(args.input, args.output_dir, **params)
+    # Resolve resource_dir for Kallisto check. When a user-config is provided
+    # it carries its own resource_dir; otherwise fall back to --resource_dir.
+    resource_for_check = args.resource_dir
+    if user_configs:
+        from uorca.graph.config import load_config
+        first_user_cfg = load_config(user_configs[0])
+        resource_for_check = str(first_user_cfg.resource_dir)
+    _check_kallisto_indices(resource_for_check)
 
-        if jobs_submitted > 0:
-            print(f"\nSuccessfully submitted {jobs_submitted} jobs to SLURM")
-        else:
-            print("\nNo jobs were submitted")
+    processor = SlurmBatchProcessor(config_file=slurm_config_file)
 
-    except Exception as e:
-        print(f"\nError: {e}")
+    geo_jobs_submitted: int = 0
+    user_job_ids: list[str] = []
+    failures: list[str] = []
+
+    if geo_input:
+        try:
+            geo_jobs_submitted = processor.submit_datasets(
+                geo_input,
+                args.output_dir,
+                max_parallel=args.max_parallel,
+                max_storage_gb=args.max_storage_gb,
+                cleanup=not args.no_cleanup,
+                resource_dir=args.resource_dir,
+            )
+            if geo_jobs_submitted == 0:
+                failures.append(f"GEO submission produced 0 jobs from {geo_input}")
+        except Exception as e:
+            failures.append(f"GEO submission exception: {e}")
+
+    for cfg in user_configs:
+        try:
+            jid = processor.submit_user_data_job(cfg)
+            if jid is None:
+                failures.append(f"User-data submission failed for {cfg}")
+            else:
+                user_job_ids.append(jid)
+        except Exception as e:
+            failures.append(f"User-data submission exception for {cfg}: {e}")
+
+    print(f"\nSubmitted: GEO jobs={geo_jobs_submitted}, user jobs={user_job_ids}")
+    if failures:
+        print("\nFailures:")
+        for f in failures:
+            print(f"  - {f}")
         sys.exit(1)
 
 

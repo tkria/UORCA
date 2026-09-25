@@ -293,13 +293,13 @@ def main(results_dir=None, port=8501, host="127.0.0.1", headless=False):
     # Ensure browser opens to 127.0.0.1 regardless of server binding address
     env['STREAMLIT_BROWSER_SERVER_ADDRESS'] = '127.0.0.1'
 
-    # Get path to uorca_explorer.py
+    # Get path to app.py
     current_dir = Path(__file__).parent
     project_root = current_dir.parent
-    explorer_script = current_dir / "gui" / "uorca_explorer.py"
+    explorer_script = current_dir / "gui" / "app.py"
 
     if not explorer_script.exists():
-        print(f"Error: Could not find uorca_explorer.py at {explorer_script}")
+        print(f"Error: Could not find app.py at {explorer_script}")
         sys.exit(1)
 
     # Check if the requested port is available

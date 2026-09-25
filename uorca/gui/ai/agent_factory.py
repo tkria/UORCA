@@ -21,7 +21,7 @@ from uorca.gui.components.helpers.ai_agent_tool_logger import (
 )
 from .gene_schema import GeneAnalysisOutput
 from .config_loader import get_ai_agent_config, get_mcp_server_config
-
+from uorca.ai_provider import get_model
 
 from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPServerStdio
@@ -43,16 +43,17 @@ def create_uorca_agent(selected_contrasts_key: str = "") -> Optional[Agent]:
         selected_contrasts_key: String representation of selected contrasts for cache invalidation
     """
 
-    if not os.getenv("OPENAI_API_KEY"):
-        logger.warning("OpenAI API key not found - AI agent creation skipped")
-        return None
-
     # Load configuration
     ai_config = get_ai_agent_config()
     mcp_config = get_mcp_server_config()
 
+    # Determine model: fall back to get_model() when config has empty value
+    model = ai_config.model
+    if not model:
+        model = get_model()
+
     try:
-        server_script = Path(__file__).parent.parent / "mcp" / "server_core.py"
+        server_script = Path(__file__).parent.parent / "mcp_server" / "server_core.py"
 
         # Create fresh environment with current selected contrasts
         server_env = os.environ.copy()
@@ -66,7 +67,7 @@ def create_uorca_agent(selected_contrasts_key: str = "") -> Optional[Agent]:
         )
 
         agent = Agent(
-            model=ai_config.model,
+            model=model,
             model_settings={"temperature": ai_config.temperature},
             mcp_servers=[server],
             system_prompt=load_system_prompt(),
