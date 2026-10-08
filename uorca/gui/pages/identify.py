@@ -206,9 +206,10 @@ def _load_results(output_dir: str) -> pd.DataFrame | None:
     if not csv_path.exists():
         return None
     try:
-        df = pd.read_csv(csv_path)
-        return df
-    except Exception:
+        return pd.read_csv(csv_path)
+    except Exception as exc:
+        # A results file that exists but cannot be read is an error, not "no results".
+        st.error(f"Could not read {csv_path}: {type(exc).__name__}: {exc}")
         return None
 
 
