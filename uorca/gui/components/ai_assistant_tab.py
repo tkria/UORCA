@@ -132,7 +132,7 @@ def _run_filtered_contrast_relevance(ri, filtered_contrast_data, query: str, rep
 
 
 def load_query_config(results_dir: Optional[str] = None) -> Optional[str]:
-    """Load the dataset identification query from results directory or config file."""
+    """Load the research question saved in the results directory, or None."""
 
     # First, try to load from results directory if provided
     if results_dir:
@@ -144,21 +144,11 @@ def load_query_config(results_dir: Optional[str] = None) -> Optional[str]:
                     research_question = question_data.get("research_question")
                     if research_question:
                         return research_question
-            except (json.JSONDecodeError, KeyError, FileNotFoundError):
-                pass
+            except (json.JSONDecodeError, KeyError, FileNotFoundError) as exc:
+                st.warning(f"Could not read {research_question_file}: {type(exc).__name__}: {exc}")
 
-    # Fallback to original config file approach
-    # Config is now in uorca/config/
-    from pathlib import Path
-    config_file_path = Path(__file__).parent.parent.parent / "config" / "dataset_query.json"
-
-    try:
-        if os.path.exists(config_file_path):
-            with open(config_file_path, 'r') as f:
-                config_data = json.load(f)
-                return config_data.get("query")
-    except (json.JSONDecodeError, KeyError, FileNotFoundError):
-        pass
+    # No global fallback (the old uorca/config/dataset_query.json): it held the last
+    # identification query from any project and was shown for unrelated results.
     return None
 
 

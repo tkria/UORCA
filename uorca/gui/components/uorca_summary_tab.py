@@ -25,9 +25,9 @@ from .helpers import log_streamlit_function, get_valid_contrasts_with_data
 def _load_research_query(results_dir: Optional[str]) -> Optional[str]:
     """Load the research question using the same logic as the AI tab.
 
-    Priority:
-      1) <results_dir>/research_question.json (key: "research_question")
-      2) uorca/config/dataset_query.json (key: "query")
+    Reads ``<results_dir>/research_question.json`` (key: "research_question"). There is
+    no global fallback: a package-wide "last query" file showed the question of an
+    unrelated identification run for these results.
     """
     # 1) results_dir/research_question.json
     if results_dir:
@@ -38,19 +38,9 @@ def _load_research_query(results_dir: Optional[str]) -> Optional[str]:
                 rq = data.get("research_question")
                 if isinstance(rq, str) and rq.strip():
                     return rq.strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                st.warning(f"Could not read {p}: {type(exc).__name__}: {exc}")
 
-    # 2) repository config fallback (now in uorca/config/)
-    p2 = Path(__file__).parent.parent.parent / "config" / "dataset_query.json"
-    if p2.exists():
-        try:
-            data = json.loads(p2.read_text())
-            q = data.get("query")
-            if isinstance(q, str) and q.strip():
-                return q.strip()
-        except Exception:
-            pass
     return None
 
 

@@ -270,36 +270,6 @@ def load_prompt(file_path: str) -> str:
         prompt_path = module_dir / "prompts" / filename
     return prompt_path.read_text().strip()
 
-# Query config management for Streamlit integration
-def save_query_config(query: str) -> None:
-    """Save the dataset identification query to a config file for Streamlit app."""
-    # Config is now in uorca/config/
-    config_dir = Path(__file__).parent.parent / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    config_file = config_dir / "dataset_query.json"
-    config_data = {
-        "query": query,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-
-    with open(config_file, 'w') as f:
-        json.dump(config_data, f, indent=2)
-
-def load_query_config() -> Optional[str]:
-    """Load the dataset identification query from config file."""
-    # Config is now in uorca/config/
-    config_file = Path(__file__).parent.parent / "config" / "dataset_query.json"
-
-    if config_file.exists():
-        try:
-            with open(config_file, 'r') as f:
-                config_data = json.load(f)
-                return config_data.get("query")
-        except (json.JSONDecodeError, KeyError):
-            return None
-    return None
-
 # Pydantic models for structured output
 class ExtractedTerms(BaseModel):
     extracted_terms: List[str]
@@ -1104,8 +1074,9 @@ def main():
     research_query = args.query
     logging.info(f"Starting dataset identification for query: {research_query}")
 
-    # Save query to config file for Streamlit app
-    save_query_config(research_query)
+    # The query is recorded in <output>/identification_metadata.json. It is no longer
+    # written to a global file inside the package (uorca/config/dataset_query.json): the
+    # explorer read that file for unrelated results and showed the wrong question.
 
     # Track timing for metadata
     start_time = datetime.datetime.now()
