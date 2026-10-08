@@ -9,14 +9,19 @@ st.set_page_config(
 
 
 def main():
+    import os
+
     from uorca.gui.pages import home, project_setup, identify, run, explore
 
+    # `uorca explore <results_dir>` should open straight onto those results.
+    open_on_explore = bool(os.environ.get(explore.RESULTS_DIR_ENV))
+
     # Create page objects and store in session state for switch_page access
-    page_home = st.Page(home.page, title="Home", icon="🏠", default=True, url_path="home")
+    page_home = st.Page(home.page, title="Home", icon="🏠", default=not open_on_explore, url_path="home")
     page_setup = st.Page(project_setup.page, title="Project Setup", icon="⚙️", url_path="project-setup")
     page_identify = st.Page(identify.page, title="Identify", icon="🔍", url_path="identify")
     page_run = st.Page(run.page, title="Run", icon="🚀", url_path="run")
-    page_explore = st.Page(explore.page, title="Explore", icon="📊", url_path="explore")
+    page_explore = st.Page(explore.page, title="Explore", icon="📊", default=open_on_explore, url_path="explore")
 
     st.session_state["_pages"] = {
         "home": page_home,

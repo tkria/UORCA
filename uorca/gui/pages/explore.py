@@ -1,8 +1,21 @@
+import os
+
 import streamlit as st
+
+# Set by ``uorca explore <results_dir>`` (uorca/explore.py). When present, the Explore
+# page shows that directory directly, without needing a project pipeline run.
+RESULTS_DIR_ENV = "UORCA_DEFAULT_RESULTS_DIR"
 
 
 def page():
     st.title("📊 Explore Results")
+
+    cli_results_dir = os.environ.get(RESULTS_DIR_ENV)
+    if cli_results_dir:
+        st.caption(f"Results directory from the command line: `{cli_results_dir}`")
+        _render_explorer(cli_results_dir)
+        return
+
     project = st.session_state.get("active_project")
     if not project:
         st.warning("Please select a project first.")

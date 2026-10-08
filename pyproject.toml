@@ -1,7 +1,7 @@
 [project]
 name = "uorca"
 version = "0.1.0"
-description = "Add your description here"
+description = "AI-assisted identification and reanalysis of public GEO RNA-seq datasets"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -34,6 +34,7 @@ dependencies = [
     "toml>=0.10.2",
     "unidecode>=1.3.8",
     "python-dotenv>=1.1.0",
+    "pyyaml>=6.0",
     "pydantic-ai>=0.2.9",
     "pydantic-graph>=0.1.0",
     "rich>=14.0.0",

@@ -19,7 +19,7 @@ Example config.yaml:
       region: ap-southeast-2
       profile: my-aws-profile
     openai:
-      model: gpt-5.6-terra
+      model: gpt-5-mini
 """
 
 import os
@@ -35,7 +35,7 @@ import yaml
 
 CONFIG_PATH = Path.home() / ".uorca" / "config.yaml"
 
-DEFAULT_OPENAI_MODEL = "gpt-5.6-terra"
+DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_BEDROCK_MODEL = "anthropic.claude-sonnet-4-5-20250929-v1:0"
 DEFAULT_BEDROCK_REGION = "ap-southeast-2"
 DEFAULT_BEDROCK_PROFILE: str | None = None
@@ -234,7 +234,7 @@ def save_ai_config(
 
     Args:
         provider: ``"openai"`` or ``"bedrock"``.
-        openai_model: Model name for OpenAI (e.g. ``"gpt-5.6-terra"``).
+        openai_model: Model name for OpenAI (e.g. ``"gpt-5-mini"``).
         bedrock_config: Dict with optional keys ``model``, ``model_prefix``,
             ``region``, ``profile``.
     """

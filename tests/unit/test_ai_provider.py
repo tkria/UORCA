@@ -31,9 +31,27 @@ def test_get_model_defaults_to_openai(monkeypatch, tmp_path):
 
 
 def test_get_model_default_openai_model(monkeypatch):
-    """With no config file and no env var, the shipped default model is used."""
+    """With no config file and no env var, the shipped default model is used.
+
+    Regression: the default was ``gpt-5.6-terra``, which the locked pydantic-ai
+    (chat-completions with function tools) cannot call: OpenAI returns HTTP 400
+    "Function tools with reasoning_effort are not supported". A fresh install with no
+    ``~/.uorca/config.yaml`` therefore failed on its first LLM call. The default must
+    be a model that works through ``openai:<model>`` and matches the README.
+    """
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    assert ai_provider.get_model() == "openai:gpt-5.6-terra"
+    monkeypatch.delenv("UORCA_OPENAI_MODEL", raising=False)
+    assert ai_provider.DEFAULT_OPENAI_MODEL == "gpt-5-mini"
+    assert ai_provider.get_model() == "openai:gpt-5-mini"
+    assert ai_provider.get_model_name() == "openai:gpt-5-mini"
+
+
+def test_readme_documents_the_shipped_default_model():
+    """The README names the same default model as the code."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    assert f"default: `{ai_provider.DEFAULT_OPENAI_MODEL}`" in readme
 
 
 def test_get_model_openai_from_config(monkeypatch, tmp_path):

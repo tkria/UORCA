@@ -69,15 +69,23 @@ from pydantic import BaseModel
 load_dotenv()
 
 # Configure Entrez with explicit key setting
-def _validate_entrez_api_key(api_key: str, email: str) -> bool:
+def _validate_entrez_api_key(
+    api_key: str, email: str, retries: int = 1
+) -> tuple[bool | None, str]:
     """
-    Validate NCBI Entrez API key by making a test request.
+    Check an NCBI Entrez API key with a test einfo request.
+
+    Only an HTTP 400 means NCBI rejected the key. A 429 (rate limit), a 5xx or a
+    network error says nothing about the key, so it is retried and then reported as
+    unverified rather than invalid.
 
     Some environments (e.g., HPC clusters behind firewalls) may cause API key
     authentication to fail with HTTP 400, even if the key is valid elsewhere.
 
     Returns:
-        True if API key is valid and working, False otherwise.
+        ``(True, detail)`` if the key works, ``(False, detail)`` if NCBI rejected it
+        (HTTP 400), ``(None, detail)`` if it could not be checked. ``detail`` names
+        the status code or error.
     """
     import urllib.request
     import urllib.parse
@@ -92,20 +100,22 @@ def _validate_entrez_api_key(api_key: str, email: str) -> bool:
 
     url = base_url + '?' + urllib.parse.urlencode(params)
 
-    try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            return resp.status == 200
-    except urllib.error.HTTPError as e:
-        if e.code == 400:
-            try:
-                response_body = e.read().decode('utf-8')
-                if 'api-key' in response_body.lower() or 'invalid' in response_body.lower():
-                    return False
-            except Exception:
-                pass
-        return False
-    except Exception:
-        return False
+    detail = "not checked"
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                if resp.status == 200:
+                    return True, "HTTP 200"
+                detail = f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                return False, "HTTP 400 (NCBI rejected the API key)"
+            detail = f"HTTP {e.code}"
+        except Exception as e:
+            detail = f"{type(e).__name__}: {e}"
+        if attempt < retries:
+            time.sleep(1.0)
+    return None, detail
 
 
 def _configure_entrez():
@@ -117,17 +127,27 @@ def _configure_entrez():
     api_key = os.getenv("ENTREZ_API_KEY")
     if api_key:
         # Validate API key before using it
-        if _validate_entrez_api_key(api_key, email):
+        valid, detail = _validate_entrez_api_key(api_key, email)
+        if valid:
             Entrez.api_key = api_key
             logging.info("NCBI Entrez API key validated successfully")
+        elif valid is None:
+            # Transient failure (rate limit, server error, network): keep the key.
+            Entrez.api_key = api_key
+            logging.warning(
+                "Could not verify the NCBI Entrez API key (%s). Keeping it; this is "
+                "usually a transient rate limit or network problem, not a bad key.",
+                detail,
+            )
         else:
-            # API key is invalid in this environment - disable it
+            # NCBI rejected the key in this environment - disable it
             Entrez.api_key = None
             os.environ.pop("ENTREZ_API_KEY", None)  # Remove from environment
             logging.warning(
-                "NCBI Entrez API key validation failed (HTTP 400: API key invalid). "
+                "NCBI Entrez API key validation failed (%s). "
                 "This can happen on HPC clusters or behind certain firewalls. "
-                "Falling back to unauthenticated access with slower rate limits."
+                "Falling back to unauthenticated access with slower rate limits.",
+                detail,
             )
     else:
         Entrez.api_key = None
@@ -249,36 +269,6 @@ def load_prompt(file_path: str) -> str:
         module_dir = Path(__file__).parent
         prompt_path = module_dir / "prompts" / filename
     return prompt_path.read_text().strip()
-
-# Query config management for Streamlit integration
-def save_query_config(query: str) -> None:
-    """Save the dataset identification query to a config file for Streamlit app."""
-    # Config is now in uorca/config/
-    config_dir = Path(__file__).parent.parent / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    config_file = config_dir / "dataset_query.json"
-    config_data = {
-        "query": query,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-
-    with open(config_file, 'w') as f:
-        json.dump(config_data, f, indent=2)
-
-def load_query_config() -> Optional[str]:
-    """Load the dataset identification query from config file."""
-    # Config is now in uorca/config/
-    config_file = Path(__file__).parent.parent / "config" / "dataset_query.json"
-
-    if config_file.exists():
-        try:
-            with open(config_file, 'r') as f:
-                config_data = json.load(f)
-                return config_data.get("query")
-        except (json.JSONDecodeError, KeyError):
-            return None
-    return None
 
 # Pydantic models for structured output
 class ExtractedTerms(BaseModel):
@@ -900,6 +890,45 @@ def build_theme_map_for_finished_run(output_dir: Path | str) -> bool:
     try:
         theme_map.build_theme_map(output_dir)
     except Exception as exc:
+        # Small or narrow runs (such as a cheap first test run) hit the small-corpus
+        # guard; that is recorded as a warning, everything else as an error.
+        _record_theme_map_failure(
+            theme_map, output_dir, exc, expected=_is_corpus_too_small(exc)
+        )
+        return False
+
+    logging.info("Theme map built for %s", output_dir)
+    return True
+
+
+def _is_corpus_too_small(exc: BaseException) -> bool:
+    """True when ``exc`` is the theme map's expected small-corpus guard.
+
+    Looked up in ``sys.modules`` rather than imported: if the cluster module failed to
+    import, that import error is the real failure and must not be re-raised here.
+    """
+    cluster = sys.modules.get("uorca.identification.theme_map.cluster")
+    return cluster is not None and isinstance(exc, cluster.CorpusTooSmallError)
+
+
+def _record_theme_map_failure(
+    theme_map, output_dir, exc: BaseException, *, expected: bool = False
+) -> None:
+    """Log a theme map failure and record it in ``theme_map/FAILED.txt``.
+
+    A real failure is logged at ERROR with its traceback. An ``expected`` one (the
+    small-corpus guard) is logged at WARNING without a traceback, because it is the
+    normal outcome of a small test run, not a crash. Both are recorded in FAILED.txt
+    so the Identify page shows why there is no map.
+    """
+    if expected:
+        logging.warning(
+            "Theme map skipped for %s: corpus too small. The identification results are "
+            "complete. %s",
+            output_dir,
+            exc,
+        )
+    else:
         logging.error(
             "Theme map build failed for %s. The identification run itself succeeded and "
             "its results are complete; the map can be rebuilt from the Identify page. "
@@ -909,35 +938,26 @@ def build_theme_map_for_finished_run(output_dir: Path | str) -> bool:
             exc,
             traceback.format_exc(),
         )
-        try:
-            theme_map.write_failure(output_dir, f"{type(exc).__name__}: {exc}")
-        except Exception as record_exc:
-            # Recording the failure must not be what finally sinks a completed run.
-            # The real failure is already in the log above; this second line says the
-            # panel will not be able to show it.
-            logging.error(
-                "The theme map failure for %s could not be recorded in FAILED.txt: "
-                "%s: %s",
-                output_dir,
-                type(record_exc).__name__,
-                record_exc,
-            )
-        return False
-
-    logging.info("Theme map built for %s", output_dir)
-    return True
+    try:
+        theme_map.write_failure(output_dir, f"{type(exc).__name__}: {exc}")
+    except Exception as record_exc:
+        # Recording the failure must not be what finally sinks a completed run.
+        # The real failure is already in the log above; this second line says the
+        # panel will not be able to show it.
+        logging.error(
+            "The theme map failure for %s could not be recorded in FAILED.txt: "
+            "%s: %s",
+            output_dir,
+            type(record_exc).__name__,
+            record_exc,
+        )
 
 
-def main():
-    """
-    Main function for dataset identification.
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``python -m uorca.identification.dataset_identification``.
 
-    Process:
-    1. Extract search terms from research query
-    2. Search GEO database for relevant datasets
-    3. Validate datasets for RNA-seq compatibility
-    4. Assess relevance of representatives using AI
-    5. Generate comprehensive results CSV (all datasets) and batch analysis CSV (filtered)
+    ``uorca identify`` (``uorca/cli.py``) forwards its options to this parser, so both
+    must accept the same flags. ``tests/unit/test_cli_identify.py`` checks that.
     """
     parser = argparse.ArgumentParser(
         description='Identify and evaluate relevant RNA-seq datasets from GEO for a biological research query',
@@ -957,8 +977,11 @@ def main():
     search_group = parser.add_argument_group('Search Options', 'Control dataset search and evaluation')
     search_group.add_argument('-m', '--max-per-term', type=int, default=500,
                              help='Maximum datasets to retrieve per search term')
-    search_group.add_argument('-n', '--num-assess', type=int, default=300,
-                             help='Number of datasets to assess for relevance')
+    # -n/--num-assess was never implemented: Stage 1 always scores every valid dataset.
+    # It stays parseable only so that old scripts get a clear message instead of
+    # "unrecognized arguments". main() rejects it when it is set.
+    search_group.add_argument('-n', '--num-assess', type=int, default=None,
+                             help=argparse.SUPPRESS)
 
     # === Advanced Parameters ===
     advanced_group = parser.add_argument_group('Advanced Options', 'Fine-tune algorithm behavior (expert users)')
@@ -986,6 +1009,21 @@ def main():
     scoring_group.add_argument('--context', type=str, default='',
                                help='Extra user-provided guidance fed into the Stage 2 scoring prompt')
 
+    return parser
+
+
+def main():
+    """
+    Main function for dataset identification.
+
+    Process:
+    1. Extract search terms from research query
+    2. Search GEO database for relevant datasets
+    3. Validate datasets for RNA-seq compatibility
+    4. Assess relevance of representatives using AI
+    5. Generate comprehensive results CSV (all datasets) and batch analysis CSV (filtered)
+    """
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     # Range validation (loud-error on out-of-range values)
@@ -995,13 +1033,18 @@ def main():
         parser.error("--design-min must be in [0, 10]")
     if not (0 <= args.stage1_biology_threshold <= 10):
         parser.error("--stage1-biology-threshold must be in [0, 10]")
+    if args.num_assess is not None:
+        parser.error(
+            "-n/--num-assess is not implemented: Stage 1 scores every valid dataset. "
+            "Use -m/--max-per-term to limit how many datasets are fetched (and so the LLM cost)."
+        )
 
     # Check for required email (Entrez guidelines)
     if not os.getenv("ENTREZ_EMAIL"):
         logging.error("Email is required for NCBI Entrez API access. Please set ENTREZ_EMAIL environment variable.")
         logging.error("Please set the ENTREZ_EMAIL environment variable with your email address.")
         logging.error("This is required by NCBI guidelines for API usage.")
-        return
+        sys.exit(1)
 
     # Auto-determine API delay based on API key presence
     api_delay = 0.25 if os.getenv("ENTREZ_API_KEY") else 0.6
@@ -1031,8 +1074,9 @@ def main():
     research_query = args.query
     logging.info(f"Starting dataset identification for query: {research_query}")
 
-    # Save query to config file for Streamlit app
-    save_query_config(research_query)
+    # The query is recorded in <output>/identification_metadata.json. It is no longer
+    # written to a global file inside the package (uorca/config/dataset_query.json): the
+    # explorer read that file for unrelated results and showed the wrong question.
 
     # Track timing for metadata
     start_time = datetime.datetime.now()

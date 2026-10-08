@@ -9,6 +9,8 @@ import sys
 import os
 import socket
 import subprocess
+import threading
+import webbrowser
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
@@ -200,6 +202,33 @@ def validate_dataset_success(results_dir):
         return False, f"Error validating dataset: {e}", 0
 
 
+def build_streamlit_command(explorer_script, port: int, host: str) -> list[str]:
+    """Return the ``streamlit run`` command for the UORCA app.
+
+    ``--server.headless`` is always ``true`` (see ``main``); ``--headless`` on the UORCA
+    CLI only controls whether UORCA opens a browser (``should_open_browser``).
+    """
+    return [
+        'uv', 'run', 'streamlit', 'run',
+        str(explorer_script),
+        '--server.port', str(port),
+        '--server.address', host,
+        '--server.headless', 'true',
+        '--browser.serverAddress', '127.0.0.1',
+        '--logger.level', 'error'
+    ]
+
+
+def should_open_browser(headless: bool) -> bool:
+    """``uorca explore --headless`` means: do not open a browser.
+
+    Regression: the old code passed ``str(not headless)`` to Streamlit, which inverted
+    the flag, so ``--headless`` made Streamlit non-headless (and it then exited 255 on
+    its first-run email prompt).
+    """
+    return not headless
+
+
 def main(results_dir=None, port=8501, host="127.0.0.1", headless=False):
     """
     Launch UORCA Explorer Streamlit application directly.
@@ -285,9 +314,13 @@ def main(results_dir=None, port=8501, host="127.0.0.1", headless=False):
 
     # Configure Streamlit
     env['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
-    env['STREAMLIT_SERVER_HEADLESS'] = 'false'
+    # Streamlit always runs headless: a non-headless Streamlit asks for an email on
+    # first run, and the output filter below hides that prompt, so the launch hangs
+    # (or exits 255 without a TTY). UORCA opens the browser itself unless --headless.
+    env['STREAMLIT_SERVER_HEADLESS'] = 'true'
     env['STREAMLIT_LOGGER_LEVEL'] = 'ERROR'
-    env['STREAMLIT_CLIENT_SHOW_ERROR_DETAILS'] = 'false'
+    # Show exceptions in the page: errors must be visible, not swallowed.
+    env['STREAMLIT_CLIENT_SHOW_ERROR_DETAILS'] = 'true'
     env['STREAMLIT_SERVER_ENABLE_CORS'] = 'false'
     env['STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION'] = 'false'
     # Ensure browser opens to 127.0.0.1 regardless of server binding address
@@ -315,15 +348,7 @@ def main(results_dir=None, port=8501, host="127.0.0.1", headless=False):
             port = available_port
 
     # Build streamlit command for direct execution
-    cmd = [
-        'uv', 'run', 'streamlit', 'run',
-        str(explorer_script),
-        '--server.port', str(port),
-        '--server.address', host,
-        '--server.headless', str(not headless).lower(),
-        '--browser.serverAddress', '127.0.0.1',
-        '--logger.level', 'error'
-    ]
+    cmd = build_streamlit_command(explorer_script, port, host)
 
     print("=" * 50)
     print("UORCA Explorer")
@@ -350,6 +375,10 @@ def main(results_dir=None, port=8501, host="127.0.0.1", headless=False):
     print("")
     print("Press Ctrl+C to stop the application")
     print("=" * 50)
+
+    if should_open_browser(headless):
+        # Give the server a moment to bind before the browser asks for the page.
+        threading.Timer(3.0, webbrowser.open, args=[primary_url]).start()
 
     try:
         # Change to project root for proper imports

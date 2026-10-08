@@ -108,7 +108,7 @@ Not an independent workflow anymore; the graph nodes import `*_core` functions f
 - **`uorca/core/`** — `task_manager.py` (SQLite-backed background tasks), `validation.py`,
   `data_formatters.py`, `gene_selection.py`, `organism_utils.py`, `script_generation.py`
 - **`uorca/shared/`** — `entrez_utils.py` (rate-limited Entrez), `workflow_logging.py`
-- **`uorca/config/`** — `ai_assistant_config.json`, `dataset_query.json`
+- **`uorca/config/`** — `ai_assistant_config.json`
 
 ---
 
