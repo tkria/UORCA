@@ -302,7 +302,7 @@ Run the test suite to validate an installation:
 uv run pytest
 ```
 
-On 2026-09-25 the result was `421 passed, 11 skipped, 1 xfailed`. The expected failure (`xfailed`) is a known
+On 2026-10-09 the result was `443 passed, 11 skipped, 1 xfailed`. The expected failure (`xfailed`) is a known
 defect in `TaskManager` (see Current Limitations). Five of the skipped tests are theme-map regression tests.
 They need real embedding corpora that the repository does not distribute, so they skip in a clean checkout. CI runs the same command on each pull request
 (`.github/workflows/tests.yml`).
