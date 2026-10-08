@@ -23,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  uorca identify -q "cancer stem cell differentiation" -o results.csv
+  uorca identify -q "cancer stem cell differentiation" -o identification_results
   uorca run slurm --input datasets.csv --output_dir ../UORCA_results
   uorca run local --input identification_results/ --output_dir ../UORCA_results
   uorca explore ../UORCA_results --port 8501
@@ -66,8 +66,10 @@ For more help on a specific command, use:
     identify_search = identify_parser.add_argument_group('Search Options', 'Control dataset search and evaluation')
     identify_search.add_argument('-m', '--max-per-term', type=int, default=500,
                                 help='Maximum datasets to retrieve per search term')
-    identify_search.add_argument('-n', '--num-assess', type=int, default=300,
-                                help='Number of datasets to assess for relevance (distributed across diversity clusters)')
+    # -n/--num-assess was never implemented (Stage 1 scores every valid dataset). It is
+    # still accepted so the identification module can reject it with a clear message.
+    identify_search.add_argument('-n', '--num-assess', type=int, default=None,
+                                help=argparse.SUPPRESS)
 
     # Advanced parameters for identify
     identify_advanced = identify_parser.add_argument_group('Advanced Options', 'Fine-tune algorithm behavior (expert users)')
@@ -88,8 +90,12 @@ For more help on a specific command, use:
                                   help='Number of independent relevance scoring rounds for reliability')
     identify_advanced.add_argument('-b', '--batch-size', type=int, default=20,
                                   help='Datasets per AI evaluation batch (affects memory usage)')
-    identify_advanced.add_argument('--model', type=str, default='gpt-5-mini',
-                                  help='OpenAI model to use for relevance assessment')
+    identify_advanced.add_argument('--context', type=str, default='',
+                                  help='Extra guidance added to the Stage 2 scoring prompt')
+    identify_advanced.add_argument('--model', type=str, default=None,
+                                  help='OpenAI model for this run (sets UORCA_OPENAI_MODEL). '
+                                       'Default: UORCA_OPENAI_MODEL, then ~/.uorca/config.yaml, '
+                                       'then gpt-5-mini. Ignored when the provider is bedrock.')
     identify_advanced.add_argument('-v', '--verbose', action='store_true',
                                    help='Enable verbose logging (DEBUG level)')
 
@@ -386,6 +392,34 @@ def _check_kallisto_indices(resource_dir: str):
         print(f"✓ All Kallisto indices found in: {indices_path}")
 
 
+def build_identify_argv(args) -> list[str]:
+    """Translate parsed ``uorca identify`` options into the identification module's argv.
+
+    Every option is forwarded, so a value the user sets is never silently dropped.
+    The output directory is made absolute against the user's working directory.
+    ``--model`` is not forwarded: ``run_identify`` applies it through the environment.
+    """
+    argv = [
+        '-q', args.query,
+        '-o', str(Path(args.output).resolve()),
+        '-t', str(args.threshold),
+        '-m', str(args.max_per_term),
+        '-r', str(args.rounds),
+        '-b', str(args.batch_size),
+        '--biology-weight', str(args.biology_weight),
+        '--design-min', str(args.design_min),
+        '--stage1-biology-threshold', str(args.stage1_biology_threshold),
+        '--library-source', args.library_source,
+    ]
+    if args.num_assess is not None:
+        argv.extend(['-n', str(args.num_assess)])
+    if args.context:
+        argv.extend(['--context', args.context])
+    if args.verbose:
+        argv.append('-v')
+    return argv
+
+
 def run_identify(args):
     """Run the dataset identification workflow."""
     # Import here to avoid startup overhead when not needed
@@ -395,18 +429,13 @@ def run_identify(args):
     _load_environment_variables()
     _check_environment_requirements(require_openai=True)  # Identify needs OpenAI
 
-    # Rebuild sys.argv to match what the original script expects
-    sys.argv = ['identify']
-    sys.argv.extend(['-q', args.query])
-    sys.argv.extend(['-o', args.output])
-    sys.argv.extend(['-t', str(args.threshold)])
-    sys.argv.extend(['-m', str(args.max_per_term)])
-    sys.argv.extend(['-n', str(args.num_assess)])
-    sys.argv.extend(['-r', str(args.rounds)])
-    sys.argv.extend(['-b', str(args.batch_size)])
-    sys.argv.extend(['--model', args.model])
-    if args.verbose:
-        sys.argv.append('-v')
+    if args.model:
+        # The identification module picks its model through uorca.ai_provider, which
+        # reads UORCA_OPENAI_MODEL. Set it here instead of forwarding --model.
+        os.environ['UORCA_OPENAI_MODEL'] = args.model
+
+    # Rebuild sys.argv for the identification module's own parser
+    sys.argv = ['identify', *build_identify_argv(args)]
 
     # Call the original main function
     identify_main()
