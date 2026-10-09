@@ -42,8 +42,23 @@ Do the steps below in sequence: prerequisites, installation, then environment va
 
 ### Prerequisites
 
+- **`git`**, to clone the repository. Check with `git --version`. On macOS, `xcode-select --install`
+  installs it.
 - **Python 3.13+** and the [`uv`](https://docs.astral.sh/uv/) package manager. `uv sync` downloads Python 3.13
-  if your system does not have it.
+  if your system does not have it, so you only need to install `uv`:
+
+  ```bash
+  # macOS or Linux
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+  # Windows (PowerShell)
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+  # Alternatives: brew install uv, or pipx install uv
+  ```
+
+  Open a new terminal, then check the install with `uv --version`. See the
+  [uv installation guide](https://docs.astral.sh/uv/getting-started/installation/) for other options.
 - **API keys**: an OpenAI API key and an email address for NCBI (see Environment variables).
 - **Only for `uorca run`**:
   - Local: Docker, and enough disk space for the raw reads.
