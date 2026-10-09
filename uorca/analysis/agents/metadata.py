@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ConfigDict
 from pydantic_ai import Agent, RunContext
 from uorca.shared import AnalysisContext
+from uorca.ai_provider import get_model
 from uorca.shared.workflow_logging import log_tool, log_agent_tool
 from unidecode import unidecode
-from openai import OpenAI
 import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ except Exception as e:
 load_dotenv()
 
 metadata_agent = Agent(
-    "openai:gpt-5-mini",         # Use GPT-5 mini
+    get_model(),
     deps_type=MetadataContext,
     system_prompt=system_prompt,
     model_settings={"temperature": 1}

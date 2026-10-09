@@ -46,10 +46,15 @@ apptainer exec \
   $BIND \
   --tmpdir=${TEMP_DIR} \
   --cleanenv \
+  --env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK}" \
+  --env OPENAI_API_KEY="${OPENAI_API_KEY}" \
+  --env ENTREZ_EMAIL="${ENTREZ_EMAIL}" \
+  --env ENTREZ_API_KEY="${ENTREZ_API_KEY}" \
+  --env PYTHONPATH="/workspace" \
   $CONTAINER_IMAGE \
   bash -lc "\
     cd /workspace && \
-    uv run python uorca/analysis/master.py \
+    uv run python -m uorca.graph.runner \
       --accession {{ accession }} \
       --output_dir /UORCA_results \
       --resource_dir {{ resource_dir }} \
@@ -73,7 +78,7 @@ docker run --rm \
   -e OPENAI_API_KEY="${OPENAI_API_KEY}" \
   -e ENTREZ_API_KEY="${ENTREZ_API_KEY}" \
   $DOCKER_IMAGE \
-  uv run python uorca/analysis/master.py \
+  python -m uorca.graph.runner \
     --accession {{ accession }} \
     --output_dir /workspace/output \
     --resource_dir /workspace/resources \

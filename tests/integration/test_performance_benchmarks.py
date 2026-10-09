@@ -2,7 +2,7 @@
 import pytest
 import pandas as pd
 import time
-from core import organism_utils, data_formatters, gene_selection, validation
+from uorca.core import organism_utils, data_formatters, gene_selection, validation
 
 
 @pytest.fixture

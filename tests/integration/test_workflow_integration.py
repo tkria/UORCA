@@ -1,7 +1,7 @@
 """Integration tests for cross-module workflows."""
 import pytest
 import pandas as pd
-from core import organism_utils, data_formatters, gene_selection, validation
+from uorca.core import organism_utils, data_formatters, gene_selection, validation
 
 
 @pytest.mark.integration

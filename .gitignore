@@ -8,17 +8,19 @@
 *scratch/*
 .aider*
 slurm_config.yaml
+.superpowers/
 uorca/config/dataset_query.json
 
 # Internal development (not for public)
 docs/*
 todos/
-scripts/
+scripts/*
+!scripts/framework_check.py
 CLAUDE.md
-AGENTS.md
 
 # Data and results
 data/*
+!data/README.md
 results.txt
 **/results/*.txt
 **/FASTQ*/

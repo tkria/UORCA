@@ -19,6 +19,7 @@ from pydantic_ai import Agent, RunContext
 from uorca.shared import ExtractionContext, RNAseqCoreContext, CheckpointStatus
 from uorca.shared.workflow_logging import log_tool, log_agent_tool
 from uorca.shared.entrez_utils import fetch_taxonomy_info, configure_entrez
+from uorca.ai_provider import get_model
 import datetime
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ load_dotenv()
 
 _prompts_dir = pathlib.Path(__file__).parent.parent / "prompts"
 extract_agent = Agent(
-    "openai:gpt-5-mini",
+    get_model(),
     deps_type=RNAseqCoreContext,
     system_prompt=(
         (_prompts_dir / "extraction.txt").read_text()
@@ -584,3 +585,429 @@ async def run_agent_async(prompt: str, deps: ExtractionContext, usage=None):
             logger.debug("Could not get usage stats: %s", e)
 
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core functions for pydantic-graph integration
+# These are independent of RunContext and can be called from graph nodes
+# ─────────────────────────────────────────────────────────────────────────────
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+import httpx
+
+
+@dataclass
+class GEOMetadataResult:
+    """Result from GEO metadata fetch."""
+    metadata_df: pd.DataFrame
+    metadata_path: str
+    organism: str
+    dataset_info: str
+
+
+@dataclass
+class FASTQDownloadResult:
+    """Result from FASTQ download."""
+    fastq_dir: str
+
+
+async def fetch_geo_metadata_core(
+    accession: str,
+    output_dir: Path,
+    entrez_email: str,
+    entrez_api_key: Optional[str] = None,
+) -> GEOMetadataResult:
+    """
+    Fetch GEO metadata - core logic extracted for graph node use.
+
+    Args:
+        accession: GEO accession (e.g., "GSE12345")
+        output_dir: Directory for output files
+        entrez_email: Email for NCBI API
+        entrez_api_key: Optional NCBI API key
+
+    Returns:
+        GEOMetadataResult with metadata DataFrame, path, organism, and dataset info
+    """
+    logger.info("fetch_geo_metadata_core() called for %s", accession)
+
+    # Set environment variables from parameters (if provided) for configure_entrez()
+    if entrez_email:
+        os.environ["ENTREZ_EMAIL"] = entrez_email
+    if entrez_api_key:
+        os.environ["ENTREZ_API_KEY"] = entrez_api_key
+
+    # Configure Entrez (reads from environment variables)
+    configure_entrez()
+
+    out_root = Path(output_dir).resolve()
+    meta_dir = out_root / "metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Saving metadata under %s", meta_dir)
+
+    # Try wget download first as a precautionary measure
+    number_part = accession.replace('GSE', '')
+    if len(number_part) > 3:
+        base_part = number_part[:-3] + 'nnn'
+    else:
+        base_part = 'nnn'
+
+    url = f"https://ftp.ncbi.nlm.nih.gov/geo/series/GSE{base_part}/{accession}/soft/{accession}_family.soft.gz"
+    filename = f"{accession}_family.soft.gz"
+
+    # Attempt wget download with timeout (but continue even if it fails)
+    try:
+        logger.info("Pre-downloading %s from %s", filename, url)
+        wget_result = subprocess.run([
+            "wget", "-O", str(meta_dir / filename), url
+        ], capture_output=True, text=True, timeout=60)
+
+        if wget_result.returncode == 0:
+            logger.info("Successfully pre-downloaded %s via wget", filename)
+        else:
+            logger.warning("wget failed for %s (return code %d), proceeding anyway",
+                         accession, wget_result.returncode)
+
+    except subprocess.TimeoutExpired:
+        logger.warning("wget timed out after 60 seconds for %s, proceeding anyway", accession)
+    except Exception as wget_e:
+        logger.warning("wget subprocess failed for %s, proceeding anyway: %s", accession, str(wget_e))
+
+    # Now attempt regular GEO parsing
+    try:
+        gse = gp.get_GEO(accession, destdir=str(meta_dir), silent=True)
+        logger.info("Successfully fetched GEO metadata for %s", accession)
+    except Exception as e:
+        logger.error("Failed to fetch GEO metadata for %s: %s", accession, str(e))
+        raise Exception(f"GEO metadata fetch failed for {accession}: {str(e)}")
+
+    gsms = gse.gsms
+    logger.info("Fetched %d GSM samples", len(gsms))
+
+    # Capture dataset information
+    dataset_info_parts = []
+
+    if 'title' in gse.metadata and gse.metadata['title']:
+        title = gse.metadata['title'][0] if isinstance(gse.metadata['title'], list) else gse.metadata['title']
+        dataset_info_parts.append(f"Title: {title}")
+
+    if 'summary' in gse.metadata and gse.metadata['summary']:
+        summary = gse.metadata['summary'][0] if isinstance(gse.metadata['summary'], list) else gse.metadata['summary']
+        dataset_info_parts.append(f"Summary: {summary}")
+
+    if 'overall_design' in gse.metadata and gse.metadata['overall_design']:
+        design = gse.metadata['overall_design'][0] if isinstance(gse.metadata['overall_design'], list) else gse.metadata['overall_design']
+        dataset_info_parts.append(f"Overall Design: {design}")
+
+    dataset_information = "\n\n".join(dataset_info_parts)
+    logger.info("Captured dataset information from GEO metadata")
+
+    # Extract species information from taxonomic ID
+    species_name = "Unknown"
+    try:
+        if 'sample_taxid' in gse.metadata and gse.metadata['sample_taxid']:
+            taxid = gse.metadata['sample_taxid'][0] if isinstance(gse.metadata['sample_taxid'], list) else gse.metadata['sample_taxid']
+            logger.info("Found taxonomic ID: %s", taxid)
+
+            taxonomy_info = fetch_taxonomy_info(str(taxid))
+
+            if taxonomy_info:
+                species_name = taxonomy_info['scientific_name']
+                logger.info("Identified species: %s", species_name)
+            else:
+                logger.warning("No species information found for taxonomic ID: %s", taxid)
+        else:
+            logger.warning("No taxonomic ID found in GEO metadata")
+    except Exception as e:
+        logger.warning("Error extracting species information: %s", str(e))
+
+    re_srx, re_srr = re.compile(r"(SR[XP]\d+)"), re.compile(r"(SRR\d+)")
+
+    def srx_from_rel(rel: List[str] | None):
+        if not rel:
+            return None
+        for line in rel:
+            hit = re_srx.search(line)
+            if hit:
+                return hit.group(1)
+        return None
+
+    # Wide sample table (uses GEOparse phenotype_data)
+    meta_wide = (
+        gse.phenotype_data
+          .reset_index()
+          .rename(columns={"index": "GSM"})
+    )
+    logger.info("meta_wide.csv prepared (%d rows, %d cols)", len(meta_wide), meta_wide.shape[1])
+
+    # Long GSM↔SRX↔SRR table
+    def srrs_from_srx(srx: str):
+        cmd = (
+            f"esearch -db sra -query {srx} | "
+            "efetch -format runinfo | cut -d',' -f1 | grep ^SRR"
+        )
+        try:
+            out = subprocess.run(
+                cmd, shell=True, check=True,
+                stdout=subprocess.PIPE, text=True
+            ).stdout.splitlines()
+            return [s for s in out if re_srr.match(s)]
+        except subprocess.CalledProcessError:
+            logger.warning("Entrez Direct failed for %s – skipping", srx)
+            return []
+
+    long_rows = []
+    for gsm, g in gsms.items():
+        srx = srx_from_rel(g.metadata.get("relation"))
+        if not srx:
+            continue
+        for srr in srrs_from_srx(srx):
+            long_rows.append({"GSM": gsm, "SRX": srx, "SRR": srr})
+
+    meta_long = pd.DataFrame(long_rows)
+    logger.info("Constructed long table: %d SRR rows", len(meta_long))
+
+    # Merge & save
+    out_df = meta_long.merge(
+        meta_wide,
+        on="GSM",
+        how="left",
+        validate="many_to_one"
+    )
+
+    metadata_filename = f"{accession}_metadata.csv"
+    out_df.to_csv(meta_dir / metadata_filename, index=False)
+    logger.info("%s written (%d rows)", metadata_filename, len(out_df))
+
+    # Filter for RNA-seq specific samples
+    logger.info("Filtering for RNA-seq specific samples")
+    initial_rows = len(out_df)
+
+    rna_seq_filter = (
+        (out_df['library_source'] == "transcriptomic") &
+        (out_df['library_strategy'] == "RNA-Seq")
+    )
+    out_df = out_df[rna_seq_filter]
+    logger.info("RNA-seq filtering: %d -> %d rows", initial_rows, len(out_df))
+
+    if len(out_df) == 0:
+        raise ValueError(
+            f"No RNA-seq samples found after filtering. Dataset {accession} contains no samples "
+            f"with library_source='transcriptomic' and library_strategy='RNA-Seq'."
+        )
+
+    # Check organism consistency
+    unique_organisms = out_df['organism_ch1'].nunique()
+    organisms_list = out_df['organism_ch1'].unique().tolist()
+    logger.info("Found %d unique organisms: %s", unique_organisms, organisms_list)
+
+    if unique_organisms > 1:
+        raise ValueError(
+            f"Multiple organisms detected in dataset {accession}: {organisms_list}. "
+            f"Analysis requires samples from a single organism."
+        )
+
+    # Validate sample count
+    unique_samples = out_df['GSM'].nunique()
+    logger.info("Found %d unique samples (GSM entries)", unique_samples)
+
+    if unique_samples <= 2:
+        raise ValueError(
+            f"Insufficient samples for analysis: only {unique_samples} unique samples found. "
+            f"Need at least 3 samples for meaningful differential expression analysis."
+        )
+
+    # Clean up temporary files
+    logger.info("Cleaning up temporary files")
+    for temp_file in meta_dir.glob("*.soft.gz"):
+        try:
+            temp_file.unlink()
+        except Exception as e:
+            logger.warning(f"Could not remove temporary file {temp_file}: {e}")
+
+    return GEOMetadataResult(
+        metadata_df=out_df,
+        metadata_path=str(meta_dir / metadata_filename),
+        organism=species_name,
+        dataset_info=dataset_information,
+    )
+
+
+async def download_fastqs_core(
+    metadata_df: pd.DataFrame,
+    output_dir: Path,
+    http_client: httpx.AsyncClient,
+    threads: int = 6,
+    max_spots: int | None = None,
+) -> FASTQDownloadResult:
+    """
+    Download FASTQ files - core logic extracted for graph node use.
+
+    Args:
+        metadata_df: DataFrame with SRR column
+        output_dir: Directory for output files
+        http_client: Async HTTP client (unused but kept for interface compatibility)
+        threads: Number of threads for fasterq-dump
+        max_spots: Maximum spots to download (for testing)
+
+    Returns:
+        FASTQDownloadResult with path to FASTQ directory
+    """
+    logger.info("download_fastqs_core() called – %d threads, max_spots=%s", threads, max_spots)
+
+    if metadata_df is None or "SRR" not in metadata_df.columns:
+        raise ValueError("metadata_df with SRR column required.")
+
+    # Determine available CPUs
+    slurm_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 8))
+    threads = max(1, min(slurm_cpus - 2, threads))
+    logger.info("Using %d threads based on system resources", threads)
+
+    out_root = Path(output_dir).resolve()
+    prefetch_dir = out_root / "sra"
+    fastq_dir = out_root / "fastq"
+    for d in (prefetch_dir, fastq_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    def sra_path(srr: str) -> pathlib.Path:
+        p = prefetch_dir / srr / f"{srr}.sra"
+        if p.exists():
+            return p
+        p_lite = prefetch_dir / srr / f"{srr}.sralite"
+        if p_lite.exists():
+            return p_lite
+        hits = list(prefetch_dir.rglob(f"{srr}.sra")) + list(prefetch_dir.rglob(f"{srr}.sralite"))
+        return hits[0] if hits else p
+
+    def fastq_ready(srr: str):
+        fastq_files = list(fastq_dir.glob(f"{srr}*.fastq.gz"))
+        return len(fastq_files) > 0 and all(f.stat().st_size > 0 for f in fastq_files)
+
+    srrs = metadata_df["SRR"].dropna().astype(str).tolist()
+    logger.info("Total SRRs listed: %d", len(srrs))
+
+    ready_count = sum(1 for srr in srrs if fastq_ready(srr))
+    logger.info("SRRs with ready FASTQ files: %d", ready_count)
+
+    srrs_needing_fastq = [s for s in srrs if not fastq_ready(s)]
+    need_prefetch = [s for s in srrs_needing_fastq if not sra_path(s).exists()]
+    logger.info("SRRs needing SRA prefetch: %d", len(need_prefetch))
+
+    async def prefetch_single(srr: str):
+        cmd = f"prefetch {srr} -O {prefetch_dir} -t https"
+        logger.debug("Running command: %s", cmd)
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error("Prefetch failed for %s: %s", srr, stderr.decode().strip())
+        return {
+            "srr": srr,
+            "returncode": proc.returncode,
+            "stdout": stdout.decode() if stdout else "",
+            "stderr": stderr.decode() if stderr else ""
+        }
+
+    if need_prefetch:
+        logger.info("Prefetching %d SRRs in parallel batches", len(need_prefetch))
+        batch_size = min(10, max(1, len(need_prefetch) // 2))
+        batches = [need_prefetch[i:i+batch_size] for i in range(0, len(need_prefetch), batch_size)]
+
+        successful_prefetch = 0
+        for batch_num, batch in enumerate(batches, 1):
+            logger.info("Processing prefetch batch %d/%d with %d SRRs", batch_num, len(batches), len(batch))
+            tasks = [prefetch_single(srr) for srr in batch]
+            results = await asyncio.gather(*tasks)
+
+            for res in results:
+                if res["returncode"] == 0:
+                    successful_prefetch += 1
+                    logger.info("Successfully prefetched %s", res["srr"])
+
+        logger.info("Prefetch completed - %d/%d successful", successful_prefetch, len(need_prefetch))
+
+    need_conversion = [srr for srr in srrs_needing_fastq if sra_path(srr).exists()]
+    logger.info("SRRs needing conversion to FASTQ: %d", len(need_conversion))
+
+    pigz = shutil.which("pigz")
+
+    converted = 0
+    for srr in need_conversion:
+        sra = sra_path(srr)
+        if not sra.exists():
+            logger.warning("%s: .sra missing after prefetch – skip.", srr)
+            continue
+
+        conversion_threads = max(1, min(threads, 16))
+
+        cmd = [
+            "fasterq-dump", str(sra),
+            "--threads", str(conversion_threads),
+            "--split-files",
+            "-v",
+            "-O", str(fastq_dir)
+        ]
+        if max_spots:
+            cmd += ["-X", str(max_spots)]
+
+        logger.info("Running fasterq-dump on %s with %d threads", srr, conversion_threads)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            logger.warning("fasterq-dump failed on %s with code %d", srr, proc.returncode)
+            continue
+
+        # Compress the FASTQ files
+        fastqs = list(fastq_dir.glob(f"{srr}*.fastq"))
+        if fastqs:
+            logger.info("Compressing %d FASTQ files for %s", len(fastqs), srr)
+            for fq in fastqs:
+                if pigz:
+                    threads_per_file = max(1, slurm_cpus // 2)
+                    gz_cmd = [pigz, "-fv", "-p", str(threads_per_file), str(fq)]
+                else:
+                    gz_cmd = ["gzip", "-fv", str(fq)]
+
+                proc = await asyncio.create_subprocess_exec(
+                    *gz_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await proc.communicate()
+
+            # Clean up SRA file after successful compression
+            if fastq_ready(srr):
+                try:
+                    sra.unlink()
+                    logger.info("Cleaned up SRA file: %s", sra.name)
+                except Exception as e:
+                    logger.warning("Failed to remove SRA file %s: %s", sra, e)
+
+        converted += 1
+        logger.info("Completed processing for %s (%d/%d)", srr, converted, len(need_conversion))
+
+    logger.info("FASTQ conversion finished: %d new SRRs converted", converted)
+
+    # Completeness gate: every expected SRR must have non-empty FASTQ output.
+    # Without this, a transient download failure (e.g. SRA-Toolkit curl 56) for
+    # a subset of samples silently shrinks the dataset and only surfaces much
+    # later as a cryptic edgeR error when a whole experimental group is lost.
+    missing = [srr for srr in srrs if not fastq_ready(srr)]
+    if missing:
+        raise RuntimeError(
+            f"FASTQ download incomplete: {len(srrs) - len(missing)}/{len(srrs)} "
+            f"SRRs ready, {len(missing)} missing: {', '.join(missing[:10])}"
+            f"{' ...' if len(missing) > 10 else ''}"
+        )
+
+    return FASTQDownloadResult(fastq_dir=str(fastq_dir))

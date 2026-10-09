@@ -10,7 +10,6 @@ import sys
 import os
 import logging
 from pathlib import Path
-from openai import OpenAI
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -23,6 +22,8 @@ from uorca.gui.components.helpers import get_valid_contrasts_with_data
 
 from uorca.gui.components.helpers import log_streamlit_agent
 from .config_loader import get_contrast_relevance_with_selection_config
+from pydantic_ai import Agent
+from uorca.ai_provider import get_model
 
 
 # Load environment variables
@@ -31,42 +32,14 @@ load_dotenv()
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# Set up OpenAI client
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    client = None
-    logger.warning("OPENAI_API_KEY not set - contrast relevance features will be disabled")
-else:
-    client = OpenAI(api_key=openai_api_key)
-
 # Add path to import from dataset_identification module
 sys.path.insert(0, str(Path(__file__).parent.parent / "dataset_identification"))
 
 def call_openai_json(prompt: str, schema: Dict[str, Any], name: str) -> dict:
-    """Call OpenAI API with JSON schema enforcement."""
-    if client is None:
-        raise RuntimeError("OpenAI client not available - API key not configured")
-
-    config = get_contrast_relevance_with_selection_config()
-    response = client.chat.completions.create(
-        model=config.model,
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": name,
-                "schema": schema,
-                "strict": True
-            }
-        },
-        temperature=config.temperature
-    )
-    content = response.choices[0].message.content
-    if content is None:
-        raise ValueError("OpenAI API returned empty response content")
-    return json.loads(content)
+    """Call LLM with JSON schema enforcement using the configured provider."""
+    agent = Agent(get_model(), output_type=str, system_prompt="You must respond with valid JSON matching the requested schema. Output ONLY the JSON, no other text.")
+    result = agent.run_sync(prompt)
+    return json.loads(result.output)
 
 # Define prompts directory for this module
 PROMPT_DIR = Path(__file__).parent / "prompts"
@@ -226,9 +199,6 @@ def run_contrast_relevance(
     pd.DataFrame
         DataFrame with contrast relevance scores and justifications
     """
-    if client is None:
-        print("⚠️ OpenAI API key not configured - contrast relevance assessment unavailable")
-        return pd.DataFrame()
     # Use proper validation logic to get valid contrasts only
     valid_contrasts = get_valid_contrasts_with_data(ri)
 
@@ -363,9 +333,6 @@ def run_contrast_relevance_with_selection(
     Returns:
         Tuple of (relevance_df, selected_contrasts_list)
     """
-    if client is None:
-        print("⚠️ OpenAI API key not configured - contrast relevance with selection unavailable")
-        return pd.DataFrame(), []
     # Build contrast list (same as before)
     # Use proper validation logic to get valid contrasts only
     valid_contrasts = get_valid_contrasts_with_data(ri)

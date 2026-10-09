@@ -1,0 +1,11 @@
+{
+  "toolkit_version": "1.5.0",
+  "framework_repository": "tkria/ti-research-software-framework",
+  "ci": "tkria/ti-research-software-framework/.github/workflows/framework-check-reusable.yml@v1",
+  "managed_files": {
+    ".github/pull_request_template.md": "d8860e7d0d747d359ca5805a2b10d41c3643f023880a781fe2fee9d644610d8b",
+    ".github/workflows/framework-check.yml": "d858b4652c555fd673fa35a9a77f88a4990c000f5d75bdff211cf4231afb0d58",
+    "scripts/framework_check.py": "c56dd85b0bb208a525f4d6c42ae5a90c25a1f3647fa4802ea1e63ee879fb66a6"
+  },
+  "note": "Written by the TI framework. Lists the framework-managed files and the template they came from; update them with scripts/update_project_framework.py, never by hand."
+}

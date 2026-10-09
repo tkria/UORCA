@@ -225,14 +225,19 @@ def add_directory_to_zip(zip_file: zipfile.ZipFile, source_dir: str, archive_dir
 # ----- R script packaging helpers (centralized) -----
 
 def _repo_paths_for_r() -> Dict[str, Path]:
+    """Resolve the on-disk locations needed to assemble the R bundle.
+
+    This file lives at uorca/gui/components/helpers/__init__.py, so:
+        parents[0] = helpers   parents[1] = components   parents[2] = gui
+        parents[3] = uorca (the package)   parents[4] = repository root
+    """
     here = Path(__file__).resolve()
-    # Navigate to project root: uorca/gui/components/helpers -> uorca/gui -> uorca -> root
-    repo_root = here.parents[3]
-    gui_dir = here.parents[2]  # uorca/gui
+    package_root = here.parents[3]
+    project_root = here.parents[4]
     return {
-        "gui_dir": gui_dir,
-        "rnaseq_r": repo_root / "scripts" / "RNAseq.R",
-        "repo_root": repo_root,
+        "rnaseq_r": package_root / "analysis" / "scripts" / "RNAseq.R",
+        "package_root": package_root,
+        "project_root": project_root,
     }
 
 
@@ -312,11 +317,14 @@ def _iter_files(dir_path: Path):
             yield Path(root) / fn
 
 
-def _patch_rnaseq_template(group_col: str, use_contrasts: bool) -> Optional[str]:
+def _patch_rnaseq_template(group_col: str, use_contrasts: bool) -> str:
     paths = _repo_paths_for_r()
     rnaseq_r = paths["rnaseq_r"]
     if not rnaseq_r.exists():
-        return None
+        raise FileNotFoundError(
+            f"RNAseq.R template not found at {rnaseq_r}. It ships with the "
+            "package, so this indicates a packaging or path-resolution fault."
+        )
     template_text = rnaseq_r.read_text(encoding='utf-8')
     fixed_block = (
         f"metadata_file <- \"metadata/edger_analysis_samples.csv\"\n"
@@ -460,12 +468,17 @@ def add_rscript_bundle_to_zip(
             species = org_map.get((info or {}).get("organism", ""), None)
             paths = _repo_paths_for_r()
             if species:
-                cand = paths["repo_root"] / "data" / "kallisto_indices" / species / "t2g.txt"
+                cand = paths["project_root"] / "data" / "kallisto_indices" / species / "t2g.txt"
                 if cand.exists():
                     with open(cand, 'rb') as f:
                         zf.writestr(f"{zip_root}/t2g.txt", f.read())
+                else:
+                    logger.warning(
+                        "t2g.txt not found at %s; the bundled RNAseq.R will run "
+                        "without transcript-to-gene mapping.", cand
+                    )
     except Exception:
-        pass
+        logger.exception("Failed to add t2g.txt to the R bundle")
 
     # Group column selection
     group_col = None
@@ -491,8 +504,7 @@ def add_rscript_bundle_to_zip(
 
     # Write patched RNAseq.R
     patched = _patch_rnaseq_template(group_col=group_col, use_contrasts=use_contrasts)
-    if patched is not None:
-        zf.writestr(f"{zip_root}/RNAseq.R", patched)
+    zf.writestr(f"{zip_root}/RNAseq.R", patched)
 
 
 def create_dataset_download_package(

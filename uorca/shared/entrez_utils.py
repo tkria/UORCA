@@ -91,10 +91,10 @@ def configure_entrez():
     logger.info("📧 Configured Entrez email: %s", email)
     
     # Set API key if available
-    api_key = os.getenv('ENTREZ_API_KEY')
-    if api_key:
-        Entrez.api_key = api_key
-        logger.info("🔑 Configured Entrez API key (first 8 chars): %s...", api_key[:8])
+    ncbi_key = os.getenv('ENTREZ_API_KEY')
+    if ncbi_key:
+        Entrez.api_key = ncbi_key
+        logger.info("🔑 Configured Entrez API key (first 8 chars): %s...", ncbi_key[:8])
     else:
         logger.warning("⚠️ No ENTREZ_API_KEY found - API calls will be rate-limited to 3/second")
     

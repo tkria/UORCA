@@ -406,6 +406,26 @@ if (!"abundance_file" %in% colnames(metadata)) {
     stop("Metadata must contain an 'abundance_file' column!")
 }
 
+# Sanitize group column values to be valid R names (handles /, spaces, etc.)
+# Store mapping for contrast expression translation
+if (merged_group %in% colnames(metadata)) {
+    original_groups <- unique(metadata[[merged_group]])
+    sanitized_groups <- make.names(original_groups)
+    group_name_mapping <- setNames(sanitized_groups, original_groups)
+
+    # Apply sanitization to the grouping column
+    metadata[[merged_group]] <- make.names(metadata[[merged_group]])
+
+    cat("Sanitized group names for R compatibility:\n")
+    for (i in seq_along(original_groups)) {
+        if (original_groups[i] != sanitized_groups[i]) {
+            cat("  ", original_groups[i], " -> ", sanitized_groups[i], "\n")
+        }
+    }
+} else {
+    group_name_mapping <- NULL
+}
+
 # Load tx2gene mapping if provided
 if (tx2gene_file != "NA" && file.exists(tx2gene_file)) {
     cat("Step 2: Checking for and loading tx2gene mapping if provided...\n")
@@ -443,11 +463,19 @@ cat("Creating DGEList...\n")
 DGE <- DGEList(counts = kallisto$counts)
 lcpm_pre <- cpm(DGE, log = TRUE)
 
-# Combine DGE$samples with metadata (bind_cols replaced with cbind)
+# DGEList() always populates samples$group with a single-level factor of 1s.
+# If merged_group is also named "group", cbind keeps both columns and
+# DGE$samples[["group"]] resolves to the default factor (single level),
+# making model.matrix fail. Drop the default before merging metadata.
+DGE$samples$group <- NULL
 DGE$samples <- cbind(DGE$samples, metadata)
 
 
 group_data <- DGE$samples[[merged_group]]
+
+# Sanitize group names to valid R names (handles SARS-CoV-2 -> SARS.CoV.2, etc.)
+group_data <- make.names(group_data)
+DGE$samples[[merged_group]] <- group_data
 
 # Filter genes with low expression
 keep.exprs <- filterByExpr(DGE, group = group_data)
@@ -490,6 +518,38 @@ if (!is.null(contrasts_file) && file.exists(contrasts_file)) {
 
     # Read the CSV file containing contrasts
     contrasts_df <- try(read.csv(contrasts_file, stringsAsFactors = FALSE))
+
+    # Sanitize group names in contrast expressions using the mapping we created earlier
+    # This ensures contrast expressions match the sanitized column names in the design matrix
+    if (class(contrasts_df) != "try-error" && "expression" %in% colnames(contrasts_df) && !is.null(group_name_mapping)) {
+        cat("Sanitizing contrast expressions using group name mapping...\n")
+
+        for (i in seq_len(nrow(contrasts_df))) {
+            expr <- contrasts_df$expression[i]
+            original_expr <- expr
+
+            # Remove backticks first
+            expr <- gsub("`([^`]+)`", "\\1", expr)
+
+            # Replace original group names with sanitized versions
+            # Sort by length (longest first) to avoid partial replacements
+            sorted_originals <- names(group_name_mapping)[order(-nchar(names(group_name_mapping)))]
+            for (orig in sorted_originals) {
+                sanitized <- group_name_mapping[[orig]]
+                if (orig != sanitized) {
+                    # Literal (fixed) replacement: group names contain spaces,
+                    # parens, slashes etc. that are unsafe to feed to a regex.
+                    expr <- gsub(orig, sanitized, expr, fixed = TRUE)
+                }
+            }
+
+            contrasts_df$expression[i] <- expr
+            if (original_expr != expr) {
+                cat("  Contrast", i, ":", original_expr, " -> ", expr, "\n")
+            }
+        }
+        cat("Sanitized contrast expressions for R compatibility\n")
+    }
 
     if (class(contrasts_df) != "try-error" && nrow(contrasts_df) > 0 &&
         all(c("name", "expression") %in% colnames(contrasts_df))) {

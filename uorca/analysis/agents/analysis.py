@@ -14,9 +14,9 @@ from pydantic_ai import Agent, RunContext
 from uorca.shared import AnalysisContext, CheckpointStatus
 from uorca.shared.workflow_logging import log_tool, log_agent_tool, log_tool_for_reflection
 from uorca.analysis.agents.metadata import metadata_agent, MetadataContext
+from uorca.ai_provider import get_model
 from unidecode import unidecode
 import datetime
-from openai import OpenAI
 import matplotlib.pyplot as plt
 import nest_asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -50,8 +50,6 @@ class ValidationError(WorkflowError):
 #############################
 
 load_dotenv()
-openai_api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI()
 
 #############################
 # SECTION: Agent definitions
@@ -69,7 +67,7 @@ except Exception as e:
     """
 
 rnaseq_agent = Agent(
-    "openai:gpt-5-mini",
+    get_model(),
     deps_type=AnalysisContext,
     system_prompt=system_prompt,
     model_settings={"temperature": 1}
@@ -131,7 +129,7 @@ except Exception as e:
     print("Using fallback system prompt instead.")
 
 rnaseq_agent = Agent(
-    'openai:gpt-5-mini',  # Use GPT-5 mini (updated default)
+    get_model(),
     deps_type=AnalysisContext,
     system_prompt=system_prompt,
     model_settings={"temperature": 1}
@@ -326,16 +324,25 @@ async def run_kallisto_quantification(ctx: RunContext[AnalysisContext],
         os.makedirs(output_dir, exist_ok=True)
 
         # Identify paired files (R1/R2)
-        r1_pat = re.compile(r'.*_(R1|1)\.fastq\.gz$')
-        r2_pat = re.compile(r'.*_(R2|2)\.fastq\.gz$')
+        # Supports both simple (*_R1.fastq.gz) and Illumina (*_R1_001.fastq.gz) naming
+        r1_pat = re.compile(r'.*_(R1|1)(_\d+)?\.fastq\.gz$')
         pairs: Dict[str, Tuple[str,str]] = {}
         for f in fastq_files:
             base = os.path.basename(f)
             if r1_pat.match(base):
-                mate = base.replace('_R1', '_R2').replace('_1.fastq', '_2.fastq')
+                # Handle both naming conventions for R2
+                # Illumina: Sample_S1_L001_R1_001.fastq.gz -> Sample_S1_L001_R2_001.fastq.gz
+                # Simple: Sample_R1.fastq.gz -> Sample_R2.fastq.gz
+                mate = re.sub(r'_R1(_\d+)?\.fastq\.gz$', lambda m: f'_R2{m.group(1) or ""}.fastq.gz', base)
+                if mate == base:  # Fallback for _1.fastq.gz format
+                    mate = base.replace('_1.fastq', '_2.fastq')
                 mate_path = os.path.join(os.path.dirname(f), mate)
                 if mate_path in fastq_files:
-                    sample = base.split('_R1')[0].split('_1.fastq')[0]
+                    # Extract sample name (before _S* for Illumina, or before _R1 for simple)
+                    # Illumina: Cardio-WT1_S24_L001_R1_001.fastq.gz -> Cardio-WT1
+                    sample = re.sub(r'_S\d+_L\d+_R1.*', '', base)  # Illumina format
+                    if sample == base:  # Not Illumina, try simple format
+                        sample = base.split('_R1')[0].split('_1.fastq')[0]
                     pairs[sample] = (f, mate_path)
 
         logger.info("🔍 Identified %d paired samples", len(pairs))
@@ -1234,3 +1241,514 @@ async def run_agent_async(prompt: str, deps: AnalysisContext, usage=None):
             logger.warning("⚠️ Failed to save tool logs: %s", str(e))
 
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core functions for pydantic-graph integration
+# These are independent of RunContext and can be called from graph nodes
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class KallistoQuantResult:
+    """Result from Kallisto quantification."""
+    abundance_files: List[str]
+    index_used: str
+    tx2gene_file: str
+
+
+@dataclass
+class EdgeRPrepResult:
+    """Result from edgeR preparation."""
+    sample_mapping_path: str
+    samples_matched: int
+
+
+@dataclass
+class DEAnalysisResult:
+    """Result from differential expression analysis."""
+    results_dir: str
+
+
+async def run_kallisto_quantification_core(
+    fastq_dir: str,
+    output_dir: pathlib.Path,
+    index_path: str,
+    tx2gene_path: str,
+    sample_mapping: Optional[Dict[str, str]] = None,
+) -> KallistoQuantResult:
+    """
+    Run Kallisto quantification - deterministic execution.
+
+    NOTE: Index and tx2gene selection should be done by an AI agent BEFORE calling
+    this function. This function only executes the quantification with provided paths.
+
+    Args:
+        fastq_dir: Directory containing FASTQ files
+        output_dir: Directory for output files
+        index_path: Path to Kallisto index (selected by agent)
+        tx2gene_path: Path to tx2gene file (selected by agent)
+        sample_mapping: Optional mapping from FASTQ prefix to biological sample ID.
+                       When provided, Kallisto outputs use clean biological names.
+
+    Returns:
+        KallistoQuantResult with abundance files, index, and tx2gene paths
+    """
+    logger.info("run_kallisto_quantification_core started")
+
+    if not fastq_dir:
+        raise ValueError("No FASTQ directory specified")
+
+    if not os.path.isdir(fastq_dir):
+        raise FileNotFoundError(f"FASTQ directory {fastq_dir} does not exist")
+
+    if not os.path.exists(index_path):
+        raise FileNotFoundError(f"Kallisto index not found at {index_path}")
+
+    if not os.path.exists(tx2gene_path):
+        raise FileNotFoundError(f"tx2gene file not found at {tx2gene_path}")
+
+    # Find FASTQ files
+    fastq_files = list(glob.glob(os.path.join(fastq_dir, "*.fastq.gz")))
+    if not fastq_files:
+        raise FileNotFoundError(f"No FASTQ files found in {fastq_dir}")
+
+    logger.info("Found %d FASTQ files in %s", len(fastq_files), fastq_dir)
+    logger.info("Using Kallisto index: %s", index_path)
+    logger.info("Using tx2gene file: %s", tx2gene_path)
+
+    # Identify paired files (R1/R2)
+    # Supports both simple (*_R1.fastq.gz) and Illumina (*_R1_*.fastq.gz) naming
+    r1_pat = re.compile(r'.*_(R1|1)(_\d+)?\.fastq\.gz$')
+    pairs: Dict[str, Tuple[str, str]] = {}
+    sample_to_output_name: Dict[str, str] = {}  # Map technical name to clean output name
+
+    for f in fastq_files:
+        base = os.path.basename(f)
+        if r1_pat.match(base):
+            # Handle both naming conventions for R2
+            mate = re.sub(r'_R1(_\d+)?\.fastq\.gz$', lambda m: f'_R2{m.group(1) or ""}.fastq.gz', base)
+            if mate == base:  # Fallback for _1.fastq.gz format
+                mate = base.replace('_1.fastq', '_2.fastq')
+            mate_path = os.path.join(os.path.dirname(f), mate)
+            if mate_path in fastq_files:
+                # Extract sample name (before _R1 or _S* for Illumina)
+                sample = re.sub(r'_S\d+_L\d+_R1.*$', '', base)  # Illumina format
+                if sample == base:  # Not Illumina, try simple format
+                    sample = base.split('_R1')[0].split('_1.fastq')[0]
+                pairs[sample] = (f, mate_path)
+
+                # Determine clean output name using sample_mapping if available
+                if sample_mapping:
+                    # Find biological prefix that matches the beginning of this sample name
+                    clean_name = None
+                    normalized_sample = sample.replace('-', '_').replace(' ', '_').lower()
+                    for prefix, bio_id in sample_mapping.items():
+                        normalized_prefix = prefix.replace('-', '_').replace(' ', '_').lower()
+                        if normalized_sample.startswith(normalized_prefix):
+                            # Extract lane info if present (e.g., _L001)
+                            lane_match = re.search(r'_(L\d+)$', sample)
+                            lane_suffix = f"_{lane_match.group(1)}" if lane_match else ""
+                            # Use biological prefix (with underscores for filesystem)
+                            clean_name = prefix + lane_suffix
+                            break
+                    sample_to_output_name[sample] = clean_name or sample
+                else:
+                    sample_to_output_name[sample] = sample
+
+    logger.info("Identified %d paired samples", len(pairs))
+    if not pairs:
+        raise ValueError("No paired FASTQ files found")
+
+    # Determine parallelization
+    total_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
+    num_samples = len(pairs)
+    desired_parallel = min(num_samples, total_cpus)
+    threads_per_job = max(total_cpus // desired_parallel, 1)
+
+    logger.info("Running %d Kallisto jobs in parallel, %d threads/job", desired_parallel, threads_per_job)
+
+    # Log if using clean naming
+    if sample_mapping:
+        logger.info("Using clean sample naming from sample_mapping (%d entries)", len(sample_mapping))
+
+    # Run Kallisto jobs
+    def run_kallisto_job(sample: str, r1: str, r2: str) -> Dict[str, Any]:
+        # Use clean output name if available
+        output_name = sample_to_output_name.get(sample, sample)
+        sample_out = os.path.join(str(output_dir), "abundance", output_name)
+        os.makedirs(sample_out, exist_ok=True)
+        cmd = [
+            "kallisto", "quant", "--rf-stranded",
+            "-i", index_path,
+            "-o", sample_out,
+            "-t", str(threads_per_job),
+            "--plaintext", r1, r2
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return {
+            "sample": sample,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "abundance_path": os.path.join(sample_out, "abundance.tsv") if result.returncode == 0 else None
+        }
+
+    abundance_files = []
+    failed_samples = []
+    with ThreadPoolExecutor(max_workers=desired_parallel) as pool:
+        future_to_sample = {
+            pool.submit(run_kallisto_job, sample, pair[0], pair[1]): sample
+            for sample, pair in pairs.items()
+        }
+        for fut in as_completed(future_to_sample):
+            res = fut.result()
+            sample = res["sample"]
+            if res["returncode"] == 0 and res["abundance_path"] and os.path.exists(res["abundance_path"]):
+                abundance_files.append(res["abundance_path"])
+                logger.info("Kallisto completed for %s", sample)
+            else:
+                failed_samples.append(sample)
+                logger.error("Kallisto failed for %s: %s", sample, res.get("stderr", "unknown error"))
+
+    logger.info("Kallisto quantification complete: %d abundance files", len(abundance_files))
+
+    if not abundance_files:
+        raise ValueError("Kallisto produced no abundance files")
+
+    # Completeness gate: every paired sample must have quantified successfully.
+    # A partial set silently shrinks the dataset and can collapse an
+    # experimental group, surfacing later as a cryptic edgeR error.
+    if failed_samples:
+        raise ValueError(
+            f"Kallisto quantification incomplete: {len(abundance_files)}/{len(pairs)} "
+            f"samples succeeded, {len(failed_samples)} failed: "
+            f"{', '.join(failed_samples[:10])}{' ...' if len(failed_samples) > 10 else ''}"
+        )
+
+    return KallistoQuantResult(
+        abundance_files=abundance_files,
+        index_used=index_path,
+        tx2gene_file=tx2gene_path,
+    )
+
+
+async def prepare_edgeR_analysis_core(
+    abundance_files: Optional[List[str]],
+    metadata_df: Optional[pd.DataFrame],
+    merged_column: Optional[str],
+    output_dir: pathlib.Path,
+    deps: Optional[Any] = None,  # WorkflowDeps for LLM agent fallback
+) -> EdgeRPrepResult:
+    """
+    Prepare edgeR analysis - core logic extracted for graph node use.
+
+    Uses a layered matching approach:
+    1. Primary: Hardcoded matching strategies (exact, normalized, prefix, contains)
+    2. Fallback: LLM agent for intelligent pattern recognition (if deps provided)
+
+    Args:
+        abundance_files: List of Kallisto abundance file paths
+        metadata_df: Metadata DataFrame
+        merged_column: Column name for grouping
+        output_dir: Directory for output files
+        deps: Optional WorkflowDeps for LLM agent fallback
+
+    Returns:
+        EdgeRPrepResult with sample mapping path and match count
+    """
+    logger.info("prepare_edgeR_analysis_core started")
+
+    if not abundance_files:
+        raise ValueError("No abundance files provided. Please run Kallisto quantification first.")
+
+    if metadata_df is None:
+        raise ValueError("Metadata not loaded.")
+
+    if merged_column is None:
+        raise ValueError("Analysis column not identified.")
+
+    os.makedirs(str(output_dir), exist_ok=True)
+
+    # Get sample names from abundance file paths
+    sample_names = [os.path.basename(os.path.dirname(f)) for f in abundance_files]
+    logger.info("Extracted %d sample names from abundance files", len(sample_names))
+
+    # Match samples to metadata
+    matched_samples: Dict[str, Dict[str, Any]] = {}
+    unmatched_samples: List[str] = []
+
+    # Check if metadata has a sample_id column (from user data mode) for direct matching
+    has_sample_id = 'sample_id' in metadata_df.columns
+
+    for i, sample_name in enumerate(sample_names):
+        matched = False
+
+        # Strategy 1: If sample_id column exists, use normalized matching (user data mode)
+        if has_sample_id:
+            # Normalize both sample name and sample_id (replace - with _, case-insensitive)
+            normalized_sample = sample_name.replace('-', '_').lower()
+            for idx, row in metadata_df.iterrows():
+                normalized_id = str(row['sample_id']).replace('-', '_').lower()
+                if normalized_sample == normalized_id:
+                    matched_samples[sample_name] = {
+                        'abundance_file': abundance_files[i],
+                        'metadata_row': idx
+                    }
+                    matched = True
+                    break
+
+        # Strategy 2: Exact match on any column
+        if not matched:
+            for col in metadata_df.columns:
+                matches = metadata_df[metadata_df[col].astype(str) == sample_name].index.tolist()
+                if matches:
+                    matched_samples[sample_name] = {
+                        'abundance_file': abundance_files[i],
+                        'metadata_row': matches[0]
+                    }
+                    matched = True
+                    break
+
+        # Strategy 3: GEO accession matching (geo_accession column)
+        if not matched and 'geo_accession' in metadata_df.columns:
+            for idx, row in metadata_df.iterrows():
+                if str(row['geo_accession']) in sample_name or sample_name in str(row['geo_accession']):
+                    matched_samples[sample_name] = {
+                        'abundance_file': abundance_files[i],
+                        'metadata_row': idx
+                    }
+                    matched = True
+                    break
+
+        # Strategy 4: Prefix/contains matching for user data with technical suffixes
+        # e.g., Kallisto name "DONOR1_REP1_DAY35_ALI_FC0001XYZ_ACGTACGTAC_L001" should match
+        #       metadata file_name "DONOR1 REP1 DAY35 ALI"
+        if not matched:
+            normalized_sample = sample_name.replace('-', '_').replace(' ', '_').lower()
+            for col in ['file_name', 'sample_id', 'sample_name']:
+                if col not in metadata_df.columns:
+                    continue
+                for idx, row in metadata_df.iterrows():
+                    meta_value = str(row[col]).replace('-', '_').replace(' ', '_').lower()
+                    # Check if normalized metadata value is a prefix of normalized sample name
+                    if normalized_sample.startswith(meta_value) or meta_value in normalized_sample:
+                        matched_samples[sample_name] = {
+                            'abundance_file': abundance_files[i],
+                            'metadata_row': idx
+                        }
+                        matched = True
+                        break
+                if matched:
+                    break
+
+        if not matched:
+            unmatched_samples.append(sample_name)
+
+    # Last resort: substring matching for remaining unmatched samples
+    for sample_name in unmatched_samples[:]:
+        for col in ['title', 'source_name_ch1', 'characteristics_ch1.1']:  # Prioritize meaningful columns
+            if col not in metadata_df.columns:
+                continue
+            for idx, value in metadata_df[col].items():
+                if sample_name in str(value) or str(value) in sample_name:
+                    matched_samples[sample_name] = {
+                        'abundance_file': abundance_files[sample_names.index(sample_name)],
+                        'metadata_row': idx
+                    }
+                    unmatched_samples.remove(sample_name)
+                    break
+            if sample_name not in unmatched_samples:
+                break
+
+    # LLM Agent Fallback: If hardcoded strategies failed and deps available, try AI
+    if unmatched_samples and deps is not None:
+        logger.info(
+            "Hardcoded matching failed for %d samples, trying LLM agent fallback",
+            len(unmatched_samples)
+        )
+        try:
+            from uorca.graph.agents import kallisto_sample_linker_agent
+
+            # Prepare prompt for agent
+            metadata_preview = metadata_df.head(10).to_string()
+            agent_prompt = f"""Match these Kallisto output sample names to metadata rows.
+
+UNMATCHED KALLISTO SAMPLES ({len(unmatched_samples)} total):
+{chr(10).join(f'- {s}' for s in unmatched_samples[:20])}
+{"... and more" if len(unmatched_samples) > 20 else ""}
+
+METADATA COLUMNS: {list(metadata_df.columns)}
+
+METADATA PREVIEW (first 10 rows):
+{metadata_preview}
+
+Find the pattern to match Kallisto names to metadata. Consider:
+- Technical suffixes in Kallisto names (flowcell, barcode, lane)
+- Normalization (spaces vs underscores, case differences)
+- Which metadata column contains the sample identifiers
+"""
+
+            agent_result = await kallisto_sample_linker_agent.run(agent_prompt, deps=deps)
+            result = agent_result.output
+
+            if result.can_match and result.mappings:
+                logger.info(
+                    "LLM agent matched %d samples using column '%s'",
+                    len(result.mappings), result.metadata_column
+                )
+                logger.info("LLM agent transformation rule: %s", result.transformation_rule)
+
+                # Apply agent mappings
+                for mapping in result.mappings:
+                    kallisto_name = mapping.kallisto_sample
+                    if kallisto_name not in unmatched_samples:
+                        continue
+
+                    # Find metadata row by the identified column
+                    meta_col = result.metadata_column
+                    if meta_col in metadata_df.columns:
+                        # Normalize for matching
+                        target = mapping.metadata_row_id.replace('-', '_').replace(' ', '_').lower()
+                        for idx, row in metadata_df.iterrows():
+                            meta_val = str(row[meta_col]).replace('-', '_').replace(' ', '_').lower()
+                            if meta_val == target or target in meta_val or meta_val in target:
+                                matched_samples[kallisto_name] = {
+                                    'abundance_file': abundance_files[sample_names.index(kallisto_name)],
+                                    'metadata_row': idx
+                                }
+                                unmatched_samples.remove(kallisto_name)
+                                break
+
+                logger.info(
+                    "After LLM agent: %d matched, %d still unmatched",
+                    len(matched_samples), len(unmatched_samples)
+                )
+
+        except Exception as e:
+            logger.warning("LLM agent fallback failed: %s", e)
+
+    # Final check - raise error if samples still unmatched
+    if unmatched_samples:
+        raise ValueError(
+            f"Could not match {len(unmatched_samples)} of {len(sample_names)} samples to metadata. "
+            f"Unmatched: {', '.join(unmatched_samples[:5])}"
+        )
+
+    # Create DataFrame for edgeR analysis
+    analysis_df = pd.DataFrame(index=list(matched_samples.keys()))
+    analysis_df['abundance_file'] = [matched_samples[s]['abundance_file'] for s in analysis_df.index]
+
+    for col in metadata_df.columns:
+        analysis_df[col] = [metadata_df.loc[matched_samples[s]['metadata_row'], col] for s in analysis_df.index]
+
+    # Save the mapping
+    metadata_dir = os.path.join(str(output_dir), "metadata")
+    os.makedirs(metadata_dir, exist_ok=True)
+    analysis_df_path = os.path.join(metadata_dir, "edger_analysis_samples.csv")
+    analysis_df.to_csv(analysis_df_path)
+
+    logger.info("Saved sample mapping to %s", analysis_df_path)
+
+    return EdgeRPrepResult(
+        sample_mapping_path=analysis_df_path,
+        samples_matched=len(analysis_df),
+    )
+
+
+async def run_edger_limma_analysis_core(
+    sample_mapping_path: Optional[str],
+    merged_column: Optional[str],
+    contrasts: Optional[List[Dict[str, str]]],
+    tx2gene_path: Optional[str],
+    output_dir: pathlib.Path,
+) -> DEAnalysisResult:
+    """
+    Run edgeR/limma analysis - core logic extracted for graph node use.
+
+    Args:
+        sample_mapping_path: Path to sample mapping CSV
+        merged_column: Column name for grouping
+        contrasts: List of contrast dictionaries
+        tx2gene_path: Path to tx2gene file
+        output_dir: Directory for output files
+
+    Returns:
+        DEAnalysisResult with results directory path
+    """
+    logger.info("run_edger_limma_analysis_core started")
+
+    if not sample_mapping_path or not os.path.exists(sample_mapping_path):
+        raise ValueError("Sample mapping file not found. Please run prepare_edgeR_analysis first.")
+
+    if not merged_column:
+        raise ValueError("Grouping column not specified.")
+
+    if not tx2gene_path or not os.path.exists(tx2gene_path):
+        raise ValueError(f"tx2gene file not found at {tx2gene_path}")
+
+    os.makedirs(str(output_dir), exist_ok=True)
+
+    # Save contrasts to CSV if provided
+    contrast_path = None
+    if contrasts:
+        metadata_dir = os.path.join(str(output_dir), "metadata")
+        os.makedirs(metadata_dir, exist_ok=True)
+        contrast_path = os.path.join(metadata_dir, "contrasts.csv")
+        pd.DataFrame(contrasts).to_csv(contrast_path, index=False)
+        logger.info("Saved contrasts to %s", contrast_path)
+
+    # Find R script
+    _scripts_dir = pathlib.Path(__file__).parent.parent / "scripts"
+    main_r_script_path = str(_scripts_dir / "RNAseq.R")
+
+    if not os.path.exists(main_r_script_path):
+        raise FileNotFoundError(f"R script not found at {main_r_script_path}")
+
+    # Build command
+    cmd = ['Rscript', main_r_script_path, sample_mapping_path, merged_column, str(output_dir), tx2gene_path]
+    if contrast_path:
+        cmd.append(contrast_path)
+
+    logger.info("Running R script: %s", ' '.join(cmd))
+
+    # Run R script
+    process = subprocess.run(cmd, capture_output=True, text=True)
+
+    # Log full stdout/stderr so the cause of any failure is recoverable from
+    # logs. Truncation here previously buried the real R Error behind tximport
+    # info lines.
+    if process.stdout:
+        logger.info("R script stdout:\n%s", process.stdout)
+    if process.stderr:
+        logger.warning("R script stderr:\n%s", process.stderr)
+
+    if process.returncode != 0:
+        # Pull out the most informative line (last `Error in ...` block) for a
+        # tight summary the reflection layer can act on, then include the full
+        # stderr so nothing is lost.
+        stderr_lines = [ln for ln in process.stderr.splitlines() if ln.strip()]
+        error_idxs = [i for i, ln in enumerate(stderr_lines)
+                      if ln.lstrip().startswith("Error in")
+                      or ln.lstrip().startswith("Error:")]
+        if error_idxs:
+            i = error_idxs[-1]
+            summary = "\n".join(stderr_lines[i:i + 3])
+        else:
+            summary = "\n".join(stderr_lines[-3:]) if stderr_lines else "(no stderr)"
+
+        raise RuntimeError(
+            f"edgeR/limma analysis failed with return code: {process.returncode}.\n"
+            f"Error: {summary}\n\n"
+            f"Full R stderr:\n{process.stderr}"
+        )
+
+    # Find results directory
+    analysis_dir = os.path.join(str(output_dir), "RNAseqAnalysis")
+
+    if not os.path.exists(analysis_dir):
+        raise RuntimeError(f"Analysis directory not created at {analysis_dir}")
+
+    logger.info("edgeR/limma analysis completed. Results at %s", analysis_dir)
+
+    return DEAnalysisResult(results_dir=analysis_dir)

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AIAgentConfig:
     """Configuration for the main AI agent."""
-    model: str = "openai:gpt-5-mini"  # Use GPT-5 mini (default)
+    model: str = ""  # Empty = use get_model() default
     temperature: float = 1.0  # Temperature set to 1 for deterministic responses
     request_limit: int = 50  # Allow sufficient tool calls for complex analyses
     analysis_timeout: int = 300  # 5 minutes timeout to prevent indefinite hanging
@@ -31,7 +31,7 @@ class AIAgentConfig:
 @dataclass
 class ContrastRelevanceWithSelectionConfig:
     """Configuration for contrast relevance with intelligent selection."""
-    model: str = "openai:gpt-5-mini"
+    model: str = ""  # Empty = use get_model() default
     temperature: float = 0.1
     repeats: int = 3
     batch_size: int = 100
@@ -56,7 +56,10 @@ class MCPServerConfig:
 class AIAssistantConfigLoader:
     """Configuration loader for AI Assistant settings."""
 
-    DEFAULT_CONFIG_PATH = Path(__file__).parent / ".config" / "ai_assistant_config.json"
+    # uorca/gui/ai/config_loader.py -> uorca/config/ai_assistant_config.json
+    DEFAULT_CONFIG_PATH = (
+        Path(__file__).parent.parent.parent / "config" / "ai_assistant_config.json"
+    )
 
     def __init__(self, config_path: Optional[Path] = None):
         """
@@ -129,7 +132,7 @@ class AIAssistantConfigLoader:
         """Get AI agent configuration."""
         config_data = self._config_data.get("ai_agent", {})
         return AIAgentConfig(
-            model=config_data.get("model", "openai:gpt-5-mini"),
+            model=config_data.get("model", ""),  # Empty string = use get_model() default
             temperature=config_data.get("temperature", 1.0),
             request_limit=config_data.get("request_limit", 50),
             analysis_timeout=config_data.get("analysis_timeout", 300)
@@ -140,7 +143,7 @@ class AIAssistantConfigLoader:
         """Get contrast relevance with selection configuration."""
         config_data = self._config_data.get("contrast_relevance_with_selection", {})
         return ContrastRelevanceWithSelectionConfig(
-            model=config_data.get("model", "openai:gpt-5-mini"),
+            model=config_data.get("model", ""),  # Empty string = use get_model() default
             temperature=config_data.get("temperature", 0.1),
             repeats=config_data.get("repeats", 3),
             batch_size=config_data.get("batch_size", 100),
