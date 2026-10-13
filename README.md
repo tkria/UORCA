@@ -28,6 +28,39 @@ UORCA automates the entire RNA-seq analysis workflow:
 4. **Interactive Exploration**: Web-based interface for visualising and analysing results across multiple datasets
 5. **AI-Powered Insights**: Intelligent analysis assistant for biological interpretation
 
+## Quickstart
+
+You need `git`, [`uv`](https://docs.astral.sh/uv/) and, for step 5 only, Docker. See [Setup](#setup) for the
+full requirements and for HPC/SLURM.
+
+```bash
+# 1. Install
+git clone https://github.com/tkria/UORCA.git
+cd UORCA
+uv sync
+
+# 2. Add your credentials (ENTREZ_EMAIL and OPENAI_API_KEY are required)
+cp .env.example .env
+# Edit .env with your values
+
+# 3. Download the Kallisto indices for the species you need
+#    (the example input below has human and mouse datasets)
+./download_kallisto_indices.sh human
+./download_kallisto_indices.sh mouse
+
+# 4. Identify datasets for a research question
+uv run uorca identify -q "type 1 diabetes islet transcriptome" -o identification_results
+
+# 5. Run the pipeline on the identified datasets (needs Docker)
+uv run uorca run local --input identification_results/ --output_dir ../UORCA_results
+
+# 6. Explore the results in the browser (http://127.0.0.1:8501)
+uv run uorca explore ../UORCA_results
+```
+
+To skip step 4, use the example input: `--input sample_inputs/`. It contains 4 datasets (2 human, 2 mouse)
+with approximately 66 GB of raw reads, so a local run needs time and disk space.
+
 ## Setup
 
 Do the steps below in sequence: prerequisites, installation, then environment variables.
