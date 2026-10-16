@@ -27,6 +27,7 @@ Examples:
   uorca run slurm --input datasets.csv --output_dir ../UORCA_results
   uorca run local --input identification_results/ --output_dir ../UORCA_results
   uorca explore ../UORCA_results --port 8501
+  uorca project import ../UORCA_results --project "My project" --create
 
 For more help on a specific command, use:
   uorca COMMAND --help
@@ -219,6 +220,36 @@ Example slurm_config.yaml:
 
     explore_parser.set_defaults(func=run_explore)
 
+    # ========================================================================
+    # PROJECT subcommand - manage GUI projects headlessly
+    # ========================================================================
+    project_parser = subparsers.add_parser(
+        'project',
+        help='Manage UORCA GUI projects (e.g. import existing results)',
+        description='Manage the projects the UORCA app reads from ~/.uorca/projects',
+    )
+    project_subparsers = project_parser.add_subparsers(
+        dest='project_command', metavar='ACTION', help='Project actions'
+    )
+    import_parser = project_subparsers.add_parser(
+        'import',
+        help='Attach an existing results folder to a project so the app can explore it',
+        description='Record results produced outside the GUI (uorca run local|slurm, site '
+                    'scripts, results copied from an HPC) as a completed pipeline run of a '
+                    'project. Accepts an analysis folder (<dir>/GSE*/RNAseqAnalysis), a run '
+                    'folder holding analysis/ (and optionally identify/), or one dataset '
+                    'folder (<dir>/RNAseqAnalysis). Nothing is copied: the project records '
+                    'the folder\'s absolute path.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    import_parser.add_argument('path', help='Results folder to import')
+    import_parser.add_argument('--project', required=True, help='Project name')
+    import_parser.add_argument('--create', action='store_true',
+                               help='Create the project if it does not exist')
+    import_parser.add_argument('--note', default=None, help='Note stored with the run')
+    import_parser.set_defaults(func=run_project_import)
+    setattr(parser, "_uorca_project_parser", project_parser)
+
     setattr(parser, "_uorca_run_parser", run_parser)  # exposed for main() error path
 
     return parser
@@ -239,6 +270,10 @@ def main():
     # Special handling for run command without batch system
     if args.command == 'run' and not hasattr(args, 'batch_system') or (hasattr(args, 'batch_system') and not args.batch_system):
         getattr(parser, "_uorca_run_parser").print_help()
+        sys.exit(1)
+
+    if args.command == 'project' and not getattr(args, 'project_command', None):
+        getattr(parser, "_uorca_project_parser").print_help()
         sys.exit(1)
 
     # Call the appropriate function
@@ -555,6 +590,27 @@ def run_batch_local(args):
     except Exception as e:
         print(f"\nError: {e}")
         sys.exit(1)
+
+
+def run_project_import(args):
+    """Import an existing results folder into a GUI project (headless)."""
+    from uorca.gui.project.importer import import_into_named_project, inspect_results
+    from uorca.gui.project.manager import ProjectManager
+
+    candidate = inspect_results(args.path)
+    for warning in candidate.warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    mgr = ProjectManager()
+    project, entries = import_into_named_project(
+        mgr, candidate, args.project, create=args.create, note=args.note
+    )
+    print(f"Imported {candidate.analysis_dir} into project '{project.name}'")
+    print(f"  datasets: {len(candidate.datasets)} found, {len(candidate.complete)} complete, "
+          f"{len(candidate.partial)} partial, {len(candidate.failed)} failed")
+    print(f"  research question: {'yes' if candidate.research_question else 'none found'}")
+    for entry in entries:
+        print(f"  run: {entry.id} ({entry.type})")
+    print(f"  project file: {mgr.projects_dir / mgr.get_project_slug(project.name) / 'project.yaml'}")
 
 
 def run_explore(args):

@@ -14,6 +14,7 @@ import streamlit as st
 from uorca.core import TaskManager, TaskStatus
 from uorca.gui.project.manager import ProjectManager
 from uorca.gui.project.models import Project, RunEntry
+from uorca.gui.project.paths import resolve_local_path
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +203,7 @@ def _sync_run_status(project: Project, task_id: str, status: TaskStatus) -> None
 
 def _load_results(output_dir: str) -> pd.DataFrame | None:
     """Load scored results CSV from an output directory, or None if absent."""
-    csv_path = Path(output_dir) / "Dataset_identification_result.csv"
+    csv_path = resolve_local_path(output_dir) / "Dataset_identification_result.csv"
     if not csv_path.exists():
         return None
     try:
@@ -356,7 +357,7 @@ def _render_left_panel(project: Project, task_manager: TaskManager) -> None:
             task_id=run_id,
             task_type="identification",
             task_func=_run_identification,
-            parameters=params,
+            parameters={**params, "output_dir": str(resolve_local_path(output_dir))},
         )
 
         st.session_state["identify_task_id"] = run_id
@@ -472,7 +473,8 @@ def _render_results_table(project: Project, selected_run: RunEntry) -> None:
 
     if df_all is None or df_all.empty:
         st.info(
-            f"No results file found for run `{selected_run.id}`. "
+            f"No results file found for run `{selected_run.id}` in "
+            f"`{resolve_local_path(output_dir) if output_dir else '(no output path)'}`. "
             "The run may still be in progress, or the output directory is unavailable."
         )
         return

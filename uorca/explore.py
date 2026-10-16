@@ -160,46 +160,31 @@ def attempt_conservative_port_cleanup(host, port):
     return False
 
 
-def validate_dataset_success(results_dir):
-    """
-    Validate that the results directory contains successful UORCA analyses.
+def check_results_dir(results_dir):
+    """Inspect a results folder for `uorca explore <path>`; exit 1 with a reason if unusable.
 
-    Args:
-        results_dir: Path to UORCA results directory
-
-    Returns:
-        tuple: (is_valid, error_message, success_count)
+    Accepts the same layouts as `uorca project import` (see uorca.gui.project.importer).
+    Returns the resolved path.
     """
+    from uorca.gui.project.importer import ImportResultsError, inspect_results
+
     try:
-        results_path = Path(results_dir).resolve()
-
-        # Look for GSE*/metadata/analysis_info.json files
-        analysis_info_files = list(results_path.glob("*/metadata/analysis_info.json"))
-
-        if not analysis_info_files:
-            return False, "No analysis_info.json files found in GSE*/metadata/ subdirectories", 0
-
-        success_count = 0
-        total_files = len(analysis_info_files)
-
-        for info_file in analysis_info_files:
-            try:
-                import json
-                with open(info_file, 'r') as f:
-                    data = json.load(f)
-                    if data.get('analysis_success') is True and data.get('unique_groups') is not None:
-                        success_count += 1
-            except (json.JSONDecodeError, IOError) as e:
-                # Skip files that can't be read or parsed
-                continue
-
-        if success_count == 0:
-            return False, f"No successful analyses found. Found {total_files} analysis files but none have 'analysis_success': true", 0
-
-        return True, f"Found {success_count} successful analyses out of {total_files} total", success_count
-
-    except Exception as e:
-        return False, f"Error validating dataset: {e}", 0
+        candidate = inspect_results(results_dir)
+    except ImportResultsError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    for warning in candidate.warnings:
+        print(f"Warning: {warning}")
+    if not candidate.importable:
+        print(f"Error: no complete dataset in {candidate.analysis_dir} "
+              f"({len(candidate.partial)} partial, {len(candidate.failed)} failed). "
+              "A dataset is complete when metadata/analysis_info.json has "
+              "\"analysis_success\": true and non-null \"unique_groups\", and "
+              "RNAseqAnalysis/CPM.csv exists.")
+        sys.exit(1)
+    print(f"Results: {len(candidate.datasets)} datasets, {len(candidate.complete)} complete, "
+          f"{len(candidate.partial)} partial, {len(candidate.failed)} failed")
+    return candidate.source
 
 
 def build_streamlit_command(explorer_script, port: int, host: str) -> list[str]:
@@ -257,45 +242,10 @@ def main(results_dir=None, port=8501, host="127.0.0.1", headless=False):
         print("To enable AI features, add OPENAI_API_KEY=your_key to your .env file.")
         print("")
 
-    # Validate results directory if provided
+    # Validate results directory if provided. The app imports it into a project named
+    # after the folder (once) and opens it on the Explore page.
     if results_dir:
-        results_path = Path(results_dir).resolve()
-        if not results_path.exists():
-            print(f"Error: Results directory does not exist: {results_dir}")
-            sys.exit(1)
-        if not results_path.is_dir():
-            print(f"Error: Results path is not a directory: {results_dir}")
-            sys.exit(1)
-
-        # Validate that the directory contains successful UORCA analyses
-        is_valid, validation_message, success_count = validate_dataset_success(results_dir)
-
-        if not is_valid:
-            print("""Please provide a directory with successful UORCA analyses. \n\nIf you believe that the directory is correct, please run: cat GSE*/metadata/analysis_info.json | grep '"analysis_success": true' - this checks for successful analyses.""")
-            sys.exit(1)
-        else:
-            # Suppress success message to keep CLI output clean
-            pass
-
-        # Count analysis folders using same logic as ResultsIntegrator
-        analysis_folders = []
-
-        # Check if the results directory itself contains RNAseqAnalysis
-        rnaseq_dir = results_path / "RNAseqAnalysis"
-        if rnaseq_dir.is_dir():
-            analysis_folders.append(results_path.name)
-
-        # If no analysis folders found in current directory, look for subdirectories
-        if not analysis_folders:
-            for item in results_path.iterdir():
-                if item.is_dir():
-                    # Check if it contains an RNAseqAnalysis subdirectory
-                    rnaseq_subdir = item / "RNAseqAnalysis"
-                    if rnaseq_subdir.is_dir():
-                        analysis_folders.append(item.name)
-
-        # Validation complete - directory contains UORCA results
-        pass
+        results_dir = str(check_results_dir(results_dir))
 
     # Set up environment for Streamlit
     env = os.environ.copy()

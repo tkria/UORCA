@@ -67,3 +67,9 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-mock>=3.15.1",
 ]
+# Browser tests (pytest -m e2e). Not installed by default: uv sync --group e2e.
+# 1.55.0 drives the chromium-1187 build; run `uv run --group e2e playwright install chromium`
+# if that browser is not cached.
+e2e = [
+    "playwright==1.55.0",
+]

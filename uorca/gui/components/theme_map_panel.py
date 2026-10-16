@@ -35,6 +35,7 @@ import streamlit as st
 from plotly.colors import qualitative
 
 from uorca.core import TaskManager, TaskStatus
+from uorca.gui.project.paths import resolve_local_path
 from uorca.identification.theme_map.artifacts import (
     ThemeMapArtifactError,
     ThemeMapBuildFailed,
@@ -995,7 +996,7 @@ def _run_dir(run: Any) -> str:
             f"Run {getattr(run, 'id', '?')!r} has no output_path, so its theme map "
             "directory cannot be located."
         )
-    return str(output_path)
+    return str(resolve_local_path(output_path))
 
 
 def _load_results_for_panel(run_dir: str) -> pd.DataFrame | None:

@@ -26,10 +26,24 @@ def _render_no_projects() -> None:
         the Gene Expression Omnibus entirely through a graphical interface —
         no command-line required.
 
-        **Get started by creating your first project.**
+        **Get started by creating your first project**, or import results you
+        already have (from `uorca run local|slurm`, or copied from an HPC).
         """
     )
-    if st.button("Create New Project", type="primary", icon="➕"):
+    col_new, col_import, _ = st.columns([1, 1, 3])
+    with col_new:
+        if st.button("Create New Project", type="primary", icon="➕"):
+            st.switch_page(st.session_state["_pages"]["project-setup"])
+    with col_import:
+        _import_button("home_import_welcome")
+
+
+def _import_button(key: str) -> None:
+    """Button that opens Project Setup on its import section."""
+    from uorca.gui.pages.project_setup import IMPORT_MODE, MODE_KEY
+
+    if st.button("Import Existing Results", icon="📥", key=key):
+        st.session_state[MODE_KEY] = IMPORT_MODE
         st.switch_page(st.session_state["_pages"]["project-setup"])
 
 
@@ -97,10 +111,12 @@ def page() -> None:
         return
 
     # Header row: title + new project button
-    hdr_col, btn_col = st.columns([6, 1])
+    hdr_col, btn_col, import_col = st.columns([4, 1, 1])
     with btn_col:
         if st.button("New Project", icon="➕", type="secondary"):
             st.switch_page(st.session_state["_pages"]["project-setup"])
+    with import_col:
+        _import_button("home_import")
 
     st.subheader("Projects")
 

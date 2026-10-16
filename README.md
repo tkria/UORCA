@@ -279,6 +279,46 @@ The app reads the same `.env` file and model settings as the command line.
 [Zenodo](https://zenodo.org/records/17403428). The record is not yet open to the public. Until it is, run
 the pipeline on `sample_inputs/` (Step 2) to get results to explore.
 
+#### Opening results produced elsewhere (import)
+
+The app organises work in projects (stored in `~/.uorca/projects/<name>/project.yaml`), and
+its Explore page lists a project's completed pipeline runs. Results produced by
+`uorca run local|slurm`, a site script, or copied from an HPC are attached to a project by
+*importing* them. Nothing is copied or moved: the project records the folder's absolute path,
+so keep the folder where it is.
+
+Accepted folders:
+- an analysis folder: `<dir>/GSE*/RNAseqAnalysis/` (what `--output_dir` holds);
+- a run folder holding `analysis/` (as above) and optionally `identify/`; the identification
+  results are imported as a linked identification run;
+- a single dataset folder: `<dir>/RNAseqAnalysis/`.
+
+A dataset counts as **complete** when `metadata/analysis_info.json` has
+`"analysis_success": true` and a non-null `"unique_groups"`, and `RNAseqAnalysis/CPM.csv`
+exists (the rule the Explorer itself applies); only complete datasets appear
+in the Explorer. Datasets with DEG tables but no successful finish are reported as **partial**,
+and the rest as **failed**. A folder with no complete dataset is refused, and so is a folder
+already imported into the same project.
+
+Three ways to import:
+- `uv run uorca explore <dir>` imports `<dir>` into a new project named after the folder (the
+  run folder's name when `<dir>` is `<run>/analysis`), selects it and opens Explore. If that
+  name is taken it uses `<parent>/<folder>` (e.g. `q1/openai`), then a numeric suffix; it never
+  adds runs to an existing project. Starting it again with the same folder finds the project
+  that already records it and adds no duplicate run.
+- In the app: **Project Setup → Import Existing Results**, or the import panel on the Explore
+  page (shown when the active project has no completed runs, and in a collapsed
+  "Import existing results" section otherwise). Type the folder path, or turn on
+  **Browse for a folder** to step through folders and click **Use this folder**. The browser
+  lists folders on the machine that runs the app. Check the preview
+  (layout, datasets found / complete / partial / failed, research question, identify folder),
+  then import into the active project or a new one.
+- Headless (e.g. on an HPC login node):
+  ```bash
+  uv run uorca project import <dir> --project "My project" --create [--note "copied from HPC"]
+  ```
+  Without `--create`, the project must already exist.
+
 ## Data
 
 All input data is public. UORCA downloads it at run time and does not commit it to this repository:

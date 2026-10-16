@@ -1,24 +1,27 @@
-import os
-
 import streamlit as st
 
-# Set by ``uorca explore <results_dir>`` (uorca/explore.py). When present, the Explore
-# page shows that directory directly, without needing a project pipeline run.
+# Set by ``uorca explore <results_dir>`` (uorca/explore.py). uorca/gui/app.py imports that
+# folder into a project and opens the app on this page.
 RESULTS_DIR_ENV = "UORCA_DEFAULT_RESULTS_DIR"
 
 
-def page():
-    st.title("📊 Explore Results")
+_IMPORT_INTRO = (
+    "Have results from `uorca run local|slurm`, a site script, or copied from an HPC? "
+    "Point at the folder to attach it to a project and explore it here."
+)
 
-    cli_results_dir = os.environ.get(RESULTS_DIR_ENV)
-    if cli_results_dir:
-        st.caption(f"Results directory from the command line: `{cli_results_dir}`")
-        _render_explorer(cli_results_dir)
-        return
+
+def page():
+    from uorca.gui.components.import_results_panel import render_import_results, show_flash
+
+    st.title("📊 Explore Results")
+    show_flash()
 
     project = st.session_state.get("active_project")
     if not project:
-        st.warning("Please select a project first.")
+        st.warning("No active project. Create one in Project Setup, or import existing results below.")
+        st.subheader("Import existing results")
+        render_import_results("explore_import", intro=_IMPORT_INTRO)
         return
 
     pipeline_runs = project.get_runs_by_type("pipeline")
@@ -26,7 +29,14 @@ def page():
 
     if not completed_runs:
         st.info(f"No completed pipeline runs in project **{project.name}** yet.")
+        st.subheader("Import existing results")
+        render_import_results("explore_import", intro=_IMPORT_INTRO)
         return
+
+    # Stay open while a path is entered, so the preview and Import button are not hidden.
+    with st.expander("Import existing results",
+                     expanded=bool(st.session_state.get("explore_import_more_path"))):
+        render_import_results("explore_import_more", intro=_IMPORT_INTRO)
 
     # Run selector (newest first)
     run_labels = []
@@ -37,28 +47,27 @@ def page():
         if r.summary:
             succeeded = r.summary.get("succeeded", "?")
             label += f" — {succeeded} with DEGs"
+        if r.params.get("imported"):
+            label += " — imported"
         if r.note:
             label += f" [{r.note}]"
         run_labels.append(label)
 
     selected_idx = st.selectbox("Select pipeline run", range(len(run_labels)), format_func=lambda i: run_labels[i])
     selected_run = list(reversed(completed_runs))[selected_idx]
-    results_dir = selected_run.output_path
+    from uorca.gui.project.paths import resolve_local_path
 
-    # Resolve relative paths against the UORCA working directory
-    from pathlib import Path
-    results_path = Path(results_dir)
-    if not results_path.is_absolute():
-        # Try relative to current working directory
-        resolved = Path.cwd() / results_path
-        if resolved.exists():
-            results_dir = str(resolved)
-        else:
-            # Try relative to the UORCA package directory
-            pkg_dir = Path(__file__).parent.parent.parent.parent
-            resolved = pkg_dir / results_path
-            if resolved.exists():
-                results_dir = str(resolved)
+    results_path = resolve_local_path(selected_run.output_path)
+    if not results_path.is_dir():
+        st.error(
+            f"Results folder for this run not found: `{results_path}` "
+            f"(recorded as `{selected_run.output_path}`)."
+        )
+        return
+    results_dir = str(results_path)
+
+    if selected_run.params.get("imported"):
+        st.caption(f"Imported results: `{results_dir}`")
 
     _render_explorer(results_dir)
 
