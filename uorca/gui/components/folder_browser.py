@@ -1,16 +1,72 @@
-"""An in-app folder browser for path text boxes.
+"""Folder pickers for path text boxes.
 
-Streamlit has no folder picker, and a native OS dialog would open on the machine running the
-server, not the viewer's. This browser lists folders on the server, so it works for a local app
-and for one served from a remote host alike.
+Streamlit has no folder picker. Two are offered here:
+
+- an in-app browser that lists folders on the server, so it works for a local app and for one
+  served from a remote host alike;
+- on macOS, the Finder "Choose Folder" dialog. A native dialog opens on the machine running
+  the server, so it is offered only when the viewer's browser is on that same machine.
 """
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
 import streamlit as st
+
+# osascript exits 1 with this AppleScript error number when the user clicks Cancel.
+_USER_CANCELLED = "(-128)"
+
+# The path is passed as an argument, never interpolated into the script.
+_CHOOSE_FOLDER_SCRIPT = [
+    "on run argv",
+    "activate",
+    'POSIX path of (choose folder with prompt "Choose a UORCA results folder" '
+    "default location (POSIX file (item 1 of argv)))",
+    "end run",
+]
+
+
+class FolderDialogError(RuntimeError):
+    """The native folder dialog failed for a reason other than the user cancelling it."""
+
+
+def finder_dialog_available(platform: str, viewer_ip: Optional[str]) -> bool:
+    """True when the Finder dialog would open on the viewer's own screen.
+
+    That needs a macOS server and a browser on the same machine. Streamlit reports no IP
+    (``None``) for a viewer on localhost.
+    """
+    return platform == "darwin" and viewer_ip in (None, "127.0.0.1", "::1")
+
+
+def choose_folder_with_finder(start: Path) -> Optional[Path]:
+    """Open the macOS "Choose Folder" dialog at ``start``; return the chosen folder.
+
+    Returns ``None`` when the user cancels. Raises ``FolderDialogError`` on any other failure.
+    Blocks until the dialog closes.
+    """
+    args = ["osascript"]
+    for line in _CHOOSE_FOLDER_SCRIPT:
+        args += ["-e", line]
+    args.append(str(start))
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FolderDialogError(f"Could not open the Finder dialog: {exc}") from exc
+    if result.returncode != 0:
+        if _USER_CANCELLED in result.stderr:
+            return None
+        raise FolderDialogError(
+            f"The Finder dialog failed (osascript exit {result.returncode}): {result.stderr.strip()}"
+        )
+    chosen = result.stdout.strip()
+    if not chosen:
+        raise FolderDialogError("The Finder dialog returned no folder.")
+    return Path(chosen)
 
 
 def list_subfolders(folder: Path) -> list[Path]:
@@ -54,6 +110,26 @@ def render_folder_browser(target_key: str, *, label: str = "Browse for a folder"
 
     def _use(folder: Path) -> None:
         st.session_state[target_key] = str(folder)
+
+    finder_error_key = f"{target_key}_finder_error"
+
+    def _choose_in_finder() -> None:
+        st.session_state.pop(finder_error_key, None)
+        try:
+            chosen = choose_folder_with_finder(start_folder(st.session_state.get(target_key, "")))
+        except FolderDialogError as exc:
+            st.session_state[finder_error_key] = str(exc)
+            return
+        if chosen is not None:
+            _use(chosen)
+            st.session_state[dir_key] = str(chosen)
+
+    if finder_dialog_available(sys.platform, st.context.ip_address):
+        st.button("Choose in Finder…", key=f"{target_key}_finder", icon="📂",
+                  on_click=_choose_in_finder,
+                  help="Opens the macOS folder dialog. It can open behind the browser window.")
+        if finder_error_key in st.session_state:
+            st.error(st.session_state[finder_error_key])
 
     # A toggle, not an expander: the import panel itself sits in an expander on the Explore page,
     # and Streamlit advises against nesting expanders.

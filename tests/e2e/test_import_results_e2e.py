@@ -7,6 +7,8 @@ Navigation starts at "/" and uses the sidebar: on a fresh session, deep links su
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from tests._results_fixtures import FAKE_QUESTION, make_arm_folder
@@ -281,6 +283,8 @@ def test_browse_for_folder_fills_path_and_imports(page, start_app, home):
     _nav(page, "Explore")
     page.get_by_text("Import existing results").first.wait_for()
 
+    if sys.platform == "darwin":  # the browser is local, so the Finder button is offered
+        page.get_by_role("button", name="Choose in Finder…").wait_for()
     page.get_by_text("Browse for a folder").click()  # the toggle
     main = page.locator('[data-testid="stMain"]')
     main.get_by_text(f"Current folder: {home}").wait_for()
