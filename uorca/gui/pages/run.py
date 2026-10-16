@@ -12,6 +12,7 @@ import streamlit as st
 
 from uorca.gui.project.manager import ProjectManager
 from uorca.gui.project.models import Project, RunEntry
+from uorca.gui.project.paths import resolve_local_path
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +801,7 @@ def _render_right_panel(project: Project) -> None:
             if input_run_id:
                 for id_run in project.get_runs_by_type("identification"):
                     if id_run.id == input_run_id and id_run.output_path:
-                        csv_path = Path(id_run.output_path) / "Dataset_identification_result.csv"
+                        csv_path = resolve_local_path(id_run.output_path) / "Dataset_identification_result.csv"
                         if csv_path.exists():
                             try:
                                 df_id = pd.read_csv(csv_path)
@@ -909,7 +910,9 @@ def _render_right_panel(project: Project) -> None:
             [r for r in pipeline_runs
              if r.status == "completed"
              and r.output_path
-             and Path(r.output_path).is_absolute()],
+             and Path(r.output_path).is_absolute()
+             # Imported runs record a local absolute path, not an HPC one.
+             and not r.params.get("imported")],
             key=lambda r: r.timestamp or "",
             reverse=True,
         )
@@ -919,8 +922,10 @@ def _render_right_panel(project: Project) -> None:
             run = remote_runs[0]  # most recent
             remote_path = run.output_path
             run_name = Path(remote_path).name
+            # Record the path relative to the data root; write under the root.
             local_path = Path("results") / run_name
-            local_path.mkdir(parents=True, exist_ok=True)
+            local_dir = resolve_local_path(local_path)
+            local_dir.mkdir(parents=True, exist_ok=True)
 
             with st.spinner(f"Syncing {run_name} from {hpc.host_alias}..."):
                 try:
@@ -928,14 +933,14 @@ def _render_right_panel(project: Project) -> None:
                     result = subprocess.run(
                         ["rsync", "-avz", "--progress",
                          f"{hpc.host_alias}:{remote_path}/",
-                         f"{local_path}/"],
+                         f"{local_dir}/"],
                         capture_output=True, text=True, timeout=600,
                     )
                     if result.returncode == 0:
                         # Update project YAML to point to local path
                         run.output_path = str(local_path)
                         _save_project(project)
-                        st.success(f"Synced **{run_name}** to `{local_path}`")
+                        st.success(f"Synced **{run_name}** to `{local_dir}`")
                     else:
                         st.error(f"rsync failed: {result.stderr[-300:]}")
                 except FileNotFoundError:

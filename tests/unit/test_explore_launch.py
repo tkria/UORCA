@@ -31,19 +31,26 @@ def test_headless_flag_controls_the_browser(headless: bool, opens: bool) -> None
     assert should_open_browser(headless) is opens
 
 
-def test_explore_page_renders_the_command_line_results_dir(
+def test_explore_page_does_not_open_the_command_line_results_dir_directly(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """`uorca explore <path>` goes through a project (uorca/gui/app.py), not a page bypass."""
     from uorca.gui.pages import explore
 
     monkeypatch.setenv(explore.RESULTS_DIR_ENV, str(tmp_path))
-    monkeypatch.setattr(explore, "st", MagicMock())
+    fake_st = MagicMock()
+    fake_st.session_state = {}
+    monkeypatch.setattr(explore, "st", fake_st)
     rendered: list[str] = []
     monkeypatch.setattr(explore, "_render_explorer", rendered.append)
+    monkeypatch.setattr(
+        "uorca.gui.components.import_results_panel.render_import_results", MagicMock()
+    )
 
     explore.page()
 
-    assert rendered == [str(tmp_path)]
+    assert rendered == []
+    fake_st.warning.assert_called_once()
 
 
 def test_explore_page_without_results_dir_needs_a_project(

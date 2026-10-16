@@ -37,8 +37,47 @@ def main():
     }
 
     pg = st.navigation(pages)
+    _import_default_results_dir()
     _render_project_selector()
     pg.run()
+
+
+DEFAULT_RESULTS_ENV = "UORCA_DEFAULT_RESULTS_DIR"
+
+
+def _import_default_results_dir():
+    """`uorca explore <path>`: attach <path> to a project named after it and select it.
+
+    Runs once per browser session. The project is created on first use; later sessions find
+    the run already recorded and import nothing.
+    """
+    import os
+
+    path = os.environ.get(DEFAULT_RESULTS_ENV, "").strip()
+    if not path:
+        return
+    if not st.session_state.get("_default_results_done"):
+        st.session_state["_default_results_done"] = True
+        from uorca.gui.components.import_results_panel import FLASH_KEY, activate_project
+        from uorca.gui.project.importer import ImportResultsError, ensure_imported
+        from uorca.gui.project.manager import ProjectManager
+
+        mgr = ProjectManager()
+        try:
+            project, entries = ensure_imported(mgr, path)
+        except ImportResultsError as exc:
+            st.session_state["_default_results_error"] = f"Could not open {path}: {exc}"
+        else:
+            activate_project(mgr, project)
+            if entries:
+                st.session_state[FLASH_KEY] = (
+                    f"Imported `{path}` into new run `{entries[-1].id}` of project "
+                    f"**{project.name}**."
+                )
+            st.switch_page(st.session_state["_pages"]["explore"])
+    error = st.session_state.get("_default_results_error")
+    if error:
+        st.sidebar.error(error)
 
 
 def _render_project_selector():

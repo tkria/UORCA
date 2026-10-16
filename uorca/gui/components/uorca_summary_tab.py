@@ -59,9 +59,13 @@ def render_uorca_summary_tab(ri: ResultsIntegrator, results_dir: str):
     total_datasets = len(getattr(ri, "cpm_data", {}) or {})
 
     # 3) Total contrasts (prefer analysis_info if available, else DEGs with data)
+    # Count only datasets the Explorer loaded (successful, with CPM). analysis_info also holds
+    # unsuccessful datasets, whose contrasts and species must not inflate the summary.
+    loaded = set(getattr(ri, "cpm_data", {}) or {})
+    loaded_info = {d: i for d, i in (getattr(ri, "analysis_info", {}) or {}).items() if d in loaded}
     total_contrasts = 0
-    if hasattr(ri, "analysis_info") and ri.analysis_info:
-        for dsid, info in ri.analysis_info.items():
+    if loaded_info:
+        for dsid, info in loaded_info.items():
             contr = info.get("contrasts")
             if isinstance(contr, list):
                 total_contrasts += len(contr)
@@ -85,8 +89,8 @@ def render_uorca_summary_tab(ri: ResultsIntegrator, results_dir: str):
 
     # 5) Datasets per species
     species_counter = Counter()
-    if hasattr(ri, "analysis_info"):
-        for dsid, info in ri.analysis_info.items():
+    if loaded_info:
+        for dsid, info in loaded_info.items():
             org = info.get("organism", "Unknown")
             if not org:
                 org = "Unknown"

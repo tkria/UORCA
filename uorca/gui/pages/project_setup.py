@@ -326,6 +326,23 @@ def _render_ai_provider_section() -> None:
     st.caption(f"Current model: {get_model_name()}")
 
 
+IMPORT_MODE = "Import Existing Results"
+MODE_KEY = "project_setup_mode"
+
+
+def _render_import_section() -> None:
+    """Attach results produced outside the GUI to the active or a new project."""
+    from uorca.gui.components.import_results_panel import render_import_results
+
+    st.subheader("Import Existing Results")
+    render_import_results(
+        "setup_import",
+        intro="Attach a results folder produced outside the app (`uorca run local|slurm`, a "
+              "site script, or results copied from an HPC) to the active project or a new one, "
+              "then explore it on the Explore page. Nothing is copied.",
+    )
+
+
 def page() -> None:
     st.title("Project Setup")
 
@@ -333,15 +350,18 @@ def page() -> None:
 
     mode = st.radio(
         "Action",
-        ["Create New Project", "Edit Existing Project"],
+        ["Create New Project", "Edit Existing Project", IMPORT_MODE],
         horizontal=True,
         label_visibility="collapsed",
+        key=MODE_KEY,
     )
 
     st.divider()
 
     if mode == "Create New Project":
         _render_create_form(mgr)
+    elif mode == IMPORT_MODE:
+        _render_import_section()
     else:
         _render_edit_form(mgr)
 

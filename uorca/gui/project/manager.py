@@ -78,6 +78,11 @@ class ProjectManager:
         project_dir.mkdir(parents=True, exist_ok=True)
         project.save(project_dir / "project.yaml")
 
+    def project_exists(self, name: str) -> bool:
+        """True when a project file exists for this name's slug."""
+        slug = _slugify(name)
+        return bool(slug) and (self.projects_dir / slug / "project.yaml").is_file()
+
     def get_project_slug(self, name: str) -> str:
         """Return the filesystem-safe slug for a project name."""
         return _slugify(name)
