@@ -43,7 +43,8 @@ from uorca.gui.ortholog_mapper import (
     get_ortholog_summary,
     get_taxid_from_organism,
     create_ortholog_mapping_table,
-    create_hierarchical_gene_list
+    create_hierarchical_gene_list,
+    ortholog_file_error,
 )
 
 # Set up fragment decorator
@@ -480,9 +481,14 @@ def _render_combined_heatmap_form(ri: ResultsIntegrator, selected_datasets: List
 
         # Ortholog expansion option (only for Custom genes)
         if gene_selection_method == "Custom":
+            # The orthologue table is downloaded separately; say so loudly if it is missing
+            ortholog_error = ortholog_file_error()
+            if ortholog_error:
+                st.error(ortholog_error)
             check_orthologs = st.checkbox(
                 "Check for orthologues",
                 value=False,
+                disabled=ortholog_error is not None,
                 help="Expand the input gene list to include orthologues in other species present in the selected datasets. Ortholog identification uses GeneOrthology.",
                 key="heatmap_check_orthologs"
             )
