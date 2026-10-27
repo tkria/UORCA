@@ -230,6 +230,7 @@ plot_volcano <- function(fit_object, output_dir, coef = 1, highlight = 10, width
     volcanoplot(fit_object,
         coef = coef, highlight = highlight,
         main = paste0("Volcano Plot: ", contrast_name),
+        ylab = "-log10(raw p-value)",
         names = rownames(fit_object)
     )
 

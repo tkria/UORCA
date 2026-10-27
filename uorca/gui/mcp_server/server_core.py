@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from functools import wraps
 from mcp.server.fastmcp import FastMCP
-from uorca.gui.results_integration import ResultsIntegrator
+from uorca.gui.results_integration import ResultsIntegrator, get_adjusted_p_column
 from uorca.gui.components.helpers.ai_agent_tool_logger import log_ai_agent_tool
 
 # Setup logging for MCP server
@@ -58,18 +58,19 @@ def load_long_table(results_dir: str) -> pd.DataFrame:
     """
     Build a DataFrame with one row per (analysis_id, contrast_id, gene)
     with columns: analysis_id, contrast_id, Gene, logFC, pvalue, AveExpr.
+
+    ``pvalue`` holds the Benjamini-Hochberg adjusted p-value (limma
+    ``adj.P.Val``). A DEG file without ``adj.P.Val`` raises; the raw
+    ``P.Value`` column is never substituted.
     """
     ri = ResultsIntegrator(results_dir)
     ri.load_data()
     pieces = []
     for aid, contrasts in ri.deg_data.items():
         for cid, df in contrasts.items():
-            # normalize p-value column - prefer adjusted p-value if available
-            df2 = df.copy()
-            if 'adj.P.Val' in df.columns:
-                df2 = df2.rename(columns={'adj.P.Val': 'pvalue'})
-            elif 'P.Value' in df.columns:
-                df2 = df2.rename(columns={'P.Value': 'pvalue'})
+            # The 'pvalue' field is the adjusted p-value (BH); raises if adj.P.Val is missing
+            adj_col = get_adjusted_p_column(df, ri.deg_source(aid, cid))
+            df2 = df.drop(columns=['pvalue'], errors='ignore').rename(columns={adj_col: 'pvalue'})
 
             # Ensure we have the required columns
             if 'Gene' not in df2.columns or 'logFC' not in df2.columns or 'pvalue' not in df2.columns:
@@ -186,7 +187,7 @@ async def get_most_common_genes(lfc_thresh: float, p_thresh: float, top_n: int) 
 
     Args:
         lfc_thresh: Minimum absolute log2 fold change threshold
-        p_thresh: Maximum p-value threshold
+        p_thresh: Maximum adjusted p-value (Benjamini-Hochberg, BH) threshold
         top_n: Number of top genes to return
 
     Returns:
@@ -216,14 +217,15 @@ async def get_most_common_genes(lfc_thresh: float, p_thresh: float, top_n: int) 
 @with_timeout(45)  # Allow extra time for multiple gene lookups
 async def get_gene_contrast_stats(genes: list, contrast_ids: list = None) -> str:
     """
-    Get detailed differential expression statistics for multiple genes across experimental contrasts to understand their context-dependent regulation patterns. This tool allows you to drill down into multiple genes that you've identified as interesting from other analyses. When contrast_ids is not specified, you'll get comprehensive data showing how the genes behave across all available experimental conditions, which is invaluable for understanding whether genes show consistent directional changes or context-specific responses. When contrast_ids is specified, you get focused results for those particular experimental conditions. Use this tool to validate findings from broader analyses, investigate literature-supported candidate genes, or understand the experimental contexts where specific genes show the strongest differential expression. The logFC values tell you the magnitude and direction of change, while p-values indicate statistical confidence.
+    Get detailed differential expression statistics for multiple genes across experimental contrasts to understand their context-dependent regulation patterns. This tool allows you to drill down into multiple genes that you've identified as interesting from other analyses. When contrast_ids is not specified, you'll get comprehensive data showing how the genes behave across all available experimental conditions, which is invaluable for understanding whether genes show consistent directional changes or context-specific responses. When contrast_ids is specified, you get focused results for those particular experimental conditions. Use this tool to validate findings from broader analyses, investigate literature-supported candidate genes, or understand the experimental contexts where specific genes show the strongest differential expression. The logFC values tell you the magnitude and direction of change, while the pvalue field (the adjusted p-value, Benjamini-Hochberg, BH) indicates statistical confidence.
 
     Args:
         genes: List of gene symbols to look up
         contrast_ids: Optional list of specific contrasts to filter to
 
     Returns:
-        JSON string with gene statistics across contrasts (long format with gene and contrast columns)
+        JSON string with gene statistics across contrasts (long format with gene and contrast columns;
+        the pvalue field is the adjusted p-value, BH)
     """
     df = get_filtered_dataframe()
     df = df[df.Gene.isin(genes)]
@@ -246,7 +248,7 @@ async def filter_genes_by_contrast_sets(set_a: list, set_b: list, lfc_thresh: fl
         set_a: List of contrast IDs for set A
         set_b: List of contrast IDs for set B
         lfc_thresh: Minimum absolute log2 fold change threshold
-        p_thresh: Maximum p-value threshold
+        p_thresh: Maximum adjusted p-value (Benjamini-Hochberg, BH) threshold
 
     Returns:
         JSON string with genes unique to set A and summary counts
@@ -313,7 +315,7 @@ async def summarise_contrast(contrast_id: str, lfc_thresh: float, p_thresh: floa
     Args:
         contrast_id: Contrast to summarize
         lfc_thresh: Minimum absolute log2 fold change threshold
-        p_thresh: Maximum p-value threshold
+        p_thresh: Maximum adjusted p-value (Benjamini-Hochberg, BH) threshold
         max_genes: Maximum number of top genes to include
 
     Returns:

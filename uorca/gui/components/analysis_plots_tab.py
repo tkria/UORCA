@@ -25,7 +25,7 @@ from .helpers import (
     create_dataset_download_package,
     generate_plot_filename
 )
-from uorca.gui.results_integration import ResultsIntegrator
+from uorca.gui.results_integration import ResultsIntegrator, ADJUSTED_P_LABEL, ADJUSTED_P_HELP, RAW_P_LABEL
 # R script bundling is now integrated into create_dataset_download_package via components['r_script']
 
 # Import single analysis plotting functions
@@ -455,13 +455,13 @@ def _render_de_plots(ri: ResultsIntegrator, selected_dataset: str, base_path: st
         return
 
     # Create contrast selection interface
-    selected_contrast = _render_contrast_selection(ri, valid_contrasts)
+    selected_contrast = _render_contrast_selection(ri, valid_contrasts, selected_dataset)
 
     if selected_contrast:
         contrast_path = os.path.join(base_path, selected_contrast)
 
         # Show contrast description
-        _display_contrast_description(ri, selected_contrast)
+        _display_contrast_description(ri, selected_contrast, selected_dataset)
 
         # Display DE plots in tabs
         _render_de_plot_tabs(ri, selected_dataset, selected_contrast, contrast_path, groups)
@@ -471,13 +471,15 @@ def _render_de_plots(ri: ResultsIntegrator, selected_dataset: str, base_path: st
 
 
 @log_streamlit_function
-def _render_contrast_selection(ri: ResultsIntegrator, contrast_dirs: List[str]) -> Optional[str]:
+def _render_contrast_selection(ri: ResultsIntegrator, contrast_dirs: List[str],
+                               analysis_id: str) -> Optional[str]:
     """Render contrast selection interface and return selected contrast."""
-    # Find contrast descriptions if available
+    # Find contrast descriptions for this dataset's contrasts
     contrast_descriptions = {}
     for c_id in contrast_dirs:
-        if hasattr(ri, "contrast_info") and c_id in ri.contrast_info:
-            contrast_descriptions[c_id] = ri.contrast_info[c_id].get('description', '')
+        entry = ri.get_contrast_entry(analysis_id, c_id)
+        if entry and isinstance(entry.get('description'), str):
+            contrast_descriptions[c_id] = entry['description']
 
     # Create a list of contrast options with descriptions
     contrast_options = []
@@ -499,12 +501,11 @@ def _render_contrast_selection(ri: ResultsIntegrator, contrast_dirs: List[str]) 
 
 
 @log_streamlit_function
-def _display_contrast_description(ri: ResultsIntegrator, selected_contrast: str):
+def _display_contrast_description(ri: ResultsIntegrator, selected_contrast: str, analysis_id: str):
     """Display the full contrast description if available."""
-    if (hasattr(ri, "contrast_info") and
-        selected_contrast in ri.contrast_info and
-        ri.contrast_info[selected_contrast].get('description')):
-        st.markdown(f"**Description:** {ri.contrast_info[selected_contrast]['description']}")
+    entry = ri.get_contrast_entry(analysis_id, selected_contrast)
+    if entry and isinstance(entry.get('description'), str) and entry['description']:
+        st.markdown(f"**Description:** {entry['description']}")
 
 
 @log_streamlit_function
@@ -523,7 +524,9 @@ def _render_de_plot_tabs(ri: ResultsIntegrator, selected_dataset: str, selected_
         },
         "Volcano Plot": {
             "file": os.path.join(contrast_path, "volcano_plot.png"),
-            "description": "**Volcano plot** showing the relationship between statistical significance (-log10 p-value on y-axis) and biological significance (log2 fold change on x-axis).\n\n- **What to look for**: Genes in the upper left and right corners are both statistically significant and have large fold changes, making them the most interesting candidates.\n\n- **Technical details**: Each point represents a gene. Red points are statistically significant DEGs after multiple testing correction."
+            "description": f"**Volcano plot** showing the relationship between statistical significance (-log10 adjusted p-value (BH) on y-axis) and biological significance (log2 fold change on x-axis).\n\n- **What to look for**: Genes in the upper left and right corners are both statistically significant and have large fold changes, making them the most interesting candidates.\n\n- **Technical details**: Each point represents a gene. Red and blue points have {ADJUSTED_P_LABEL} below the threshold and |log2FC| above it.",
+            # The static PNG written by RNAseq.R plots the raw p-value on its y-axis
+            "static_description": "**Volcano plot** (static image from the R pipeline) showing statistical significance (-log10 raw p-value on y-axis) against log2 fold change (x-axis).\n\n- **What to look for**: Genes in the upper left and right corners have small raw p-values and large fold changes.\n\n- **Technical details**: Each point represents a gene. The y-axis is the raw p-value. The 10 labelled genes have the smallest raw p-values; this image does not mark significance by adjusted p-value (BH)."
         }
     }
 
@@ -554,7 +557,9 @@ def _render_volcano_plot_tab(ri: ResultsIntegrator, selected_dataset: str, selec
         try:
             deg_df = ri.deg_data[selected_dataset][selected_contrast]
             volcano_fig = create_volcano_plot(deg_df)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Interactive volcano plot failed for {selected_dataset}/{selected_contrast}: {e}", exc_info=True)
+            st.warning(f"Could not create the interactive volcano plot: {e}")
             volcano_fig = None
 
     if volcano_fig is not None:
@@ -563,8 +568,9 @@ def _render_volcano_plot_tab(ri: ResultsIntegrator, selected_dataset: str, selec
             st.markdown(contrast_plot_files["Volcano Plot"]["description"])
     elif os.path.exists(contrast_plot_files["Volcano Plot"]["file"]):
         st.image(contrast_plot_files["Volcano Plot"]["file"])
+        st.caption("Static image: the y-axis is -log10(raw p-value).")
         with st.expander("What does this plot mean?", expanded=True):
-            st.markdown(contrast_plot_files["Volcano Plot"]["description"])
+            st.markdown(contrast_plot_files["Volcano Plot"]["static_description"])
     else:
         st.info("Volcano plot not available for this contrast.")
 
@@ -580,7 +586,9 @@ def _render_ma_plot_tab(ri: ResultsIntegrator, selected_dataset: str, selected_c
         try:
             deg_df = ri.deg_data[selected_dataset][selected_contrast]
             ma_fig = create_ma_plot(deg_df)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Interactive MA plot failed for {selected_dataset}/{selected_contrast}: {e}", exc_info=True)
+            st.warning(f"Could not create the interactive MA plot: {e}")
             ma_fig = None
 
     if ma_fig is not None:
@@ -646,9 +654,9 @@ def _render_deg_table(selected_dataset: str, selected_contrast: str, contrast_pa
                 try:
                     display_df['adj.P.Val'] = pd.to_numeric(display_df['adj.P.Val'])
                     column_config['adj.P.Val'] = st.column_config.NumberColumn(
-                        "adj.P.Val",
+                        ADJUSTED_P_LABEL,
                         format="%.2e",
-                        help="Adjusted p-value (corrected for multiple testing)"
+                        help=ADJUSTED_P_HELP
                     )
                 except:
                     st.warning("Could not convert adj.P.Val to numeric format for sorting.")
@@ -657,9 +665,9 @@ def _render_deg_table(selected_dataset: str, selected_contrast: str, contrast_pa
                 try:
                     display_df['P.Value'] = pd.to_numeric(display_df['P.Value'])
                     column_config['P.Value'] = st.column_config.NumberColumn(
-                        "P.Value",
+                        RAW_P_LABEL,
                         format="%.2e",
-                        help="Unadjusted p-value"
+                        help="Raw (unadjusted) p-value (limma column P.Value)"
                     )
                 except:
                     st.warning("Could not convert P.Value to numeric format for sorting.")

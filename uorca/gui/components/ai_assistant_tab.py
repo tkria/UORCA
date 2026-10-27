@@ -1074,7 +1074,7 @@ def _display_unified_ai_results(
                             'Dataset': aid,
                             'Contrast': cid,
                             'logFC': rec.get("logFC", 0),
-                            'P-value': rec.get("adj.P.Val") or rec.get("P.Value", 1)
+                            'Adjusted p-value (BH)': rec.get("adj.P.Val") or rec.get("P.Value", 1)
                         })
             if not hit:
                 missing.append(gene)
@@ -1235,7 +1235,7 @@ def _display_unified_ai_results(
                 use_container_width=True,
                 column_config={
                     "logFC": st.column_config.NumberColumn("Log2FC", format="%.2f"),
-                    "P-value": st.column_config.NumberColumn("P-value", format="%.2e")
+                    "Adjusted p-value (BH)": st.column_config.NumberColumn("Adjusted p-value (BH)", format="%.2e")
                 }
             )
 
@@ -1893,7 +1893,7 @@ def _display_tool_calls_detailed(tool_calls: List[Dict]):
                                                 'Gene': item.get('Gene', ''),
                                                 'Contrast': item.get('contrast_id', ''),
                                                 'logFC': item.get('logFC', ''),
-                                                'P-value': item.get('pvalue', '')
+                                                'Adjusted p-value (BH)': item.get('pvalue', '')
                                             })
                                     if df_data:
                                         import pandas as pd

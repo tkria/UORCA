@@ -17,10 +17,10 @@ class GeneFilters(BaseModel):
 
     Attributes:
         lfc_thresh: Log2 fold change threshold (must be >= 0)
-        p_thresh: P-value threshold (must be > 0 and <= 1)
+        p_thresh: Adjusted p-value (BH) threshold (must be > 0 and <= 1)
     """
     lfc_thresh: float = Field(..., ge=0, description="Log2 fold change threshold")
-    p_thresh: float = Field(..., gt=0, le=1, description="P-value threshold")
+    p_thresh: float = Field(..., gt=0, le=1, description="Adjusted p-value (BH) threshold")
 
 
 class GeneAnalysisOutput(BaseModel):

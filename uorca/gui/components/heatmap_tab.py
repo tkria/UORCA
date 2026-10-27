@@ -33,7 +33,7 @@ from .helpers import (
     plotly_fig_to_pdf_bytes,
     generate_plot_filename
 )
-from uorca.gui.results_integration import ResultsIntegrator
+from uorca.gui.results_integration import ResultsIntegrator, ADJUSTED_P_LABEL, ADJUSTED_P_HELP
 
 # Import core modules
 from uorca.core import validation, script_generation
@@ -171,14 +171,15 @@ def render_heatmap_tab(ri: ResultsIntegrator, selected_datasets: List[str], **kw
                         species_genes_for_cache = species_genes
                         with st.expander(f"Copy Frequent DEGs for {get_organism_display_name(organism)} ({len(species_genes)})", expanded=False):
                             st.code("\n".join(species_genes) if species_genes else "", language=None)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Could not list frequent DEGs for {organism}: {e}", exc_info=True)
+                        st.warning(f"Could not list frequent DEGs for {get_organism_display_name(organism)}: {e}")
 
                 # Info panel: appears once plots are generated (placed above heatmap)
                 with st.expander("What this heatmap shows", expanded=False):
                     st.markdown(
                         f"- Values are log2 fold change (log2FC) computed within each dataset's contrast.\n"
-                        f"- Only significant values are shown: adj.P.Val < {gene_params.get('pvalue_thresh', 0.05)} and |logFC| > {gene_params.get('lfc_thresh', 1.0)}.\n"
+                        f"- Only significant values are shown: {ADJUSTED_P_LABEL} < {gene_params.get('pvalue_thresh', 0.05)} and |logFC| > {gene_params.get('lfc_thresh', 1.0)}.\n"
                         f"  Non-significant entries are set to 0 and hidden by filtering."
                     )
 
@@ -252,7 +253,7 @@ def render_heatmap_tab(ri: ResultsIntegrator, selected_datasets: List[str], **kw
                             with st.expander("What this heatmap shows", expanded=False):
                                 st.markdown(
                                     f"- Values are log2 fold change (log2FC) computed within each dataset's contrast.\n"
-                                    f"- Only significant values are shown: adj.P.Val < {gene_params.get('pvalue_thresh', 0.05)} and |logFC| > {gene_params.get('lfc_thresh', 1.0)}.\n"
+                                    f"- Only significant values are shown: {ADJUSTED_P_LABEL} < {gene_params.get('pvalue_thresh', 0.05)} and |logFC| > {gene_params.get('lfc_thresh', 1.0)}.\n"
                                     f"  Non-significant entries are set to 0 and hidden by filtering."
                                 )
                             _draw_heatmap(
@@ -328,7 +329,7 @@ def render_heatmap_tab(ri: ResultsIntegrator, selected_datasets: List[str], **kw
                         with st.expander("What does this plot mean?", expanded=False):
                             st.markdown(
                                 f"- Values are log2 fold change (log2FC) computed within each dataset's contrast.\n"
-                                f"- Only significant values are shown: adj.P.Val < {params.get('pvalue_thresh', 0.05)} and |logFC| > {params.get('lfc_thresh', 1.0)}.\n"
+                                f"- Only significant values are shown: {ADJUSTED_P_LABEL} < {params.get('pvalue_thresh', 0.05)} and |logFC| > {params.get('lfc_thresh', 1.0)}.\n"
                                 f"  Non-significant entries are set to 0 and hidden by filtering."
                             )
                         _draw_heatmap(
@@ -357,7 +358,7 @@ def render_heatmap_tab(ri: ResultsIntegrator, selected_datasets: List[str], **kw
                 with st.expander("What does this plot mean?", expanded=False):
                     st.markdown(
                         f"- Values are log2 fold change (log2FC) computed within each dataset's contrast.\n"
-                        f"- Only significant values are shown: adj.P.Val < {params.get('pvalue_thresh', 0.05)} and |logFC| > {params.get('lfc_thresh', 1.0)}.\n"
+                        f"- Only significant values are shown: {ADJUSTED_P_LABEL} < {params.get('pvalue_thresh', 0.05)} and |logFC| > {params.get('lfc_thresh', 1.0)}.\n"
                         f"  Non-significant entries are set to 0 and hidden by filtering."
                     )
                 _draw_heatmap(
@@ -507,9 +508,9 @@ def _render_combined_heatmap_form(ri: ResultsIntegrator, selected_datasets: List
             )
         with col2:
             pvalue_thresh = st.text_input(
-                "P-value Threshold",
+                f"{ADJUSTED_P_LABEL} threshold",
                 value="0.05",
-                help="Adjusted p-value threshold for significance",
+                help=f"Genes count as significant when their {ADJUSTED_P_HELP} is below this value",
                 key="heatmap_combined_pvalue_threshold"
             )
 

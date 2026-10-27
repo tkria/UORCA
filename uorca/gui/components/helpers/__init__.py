@@ -902,7 +902,7 @@ def cached_identify_important_genes(
         results_dir: Path to results directory
         selected_contrasts: List of (analysis_id, contrast_id) tuples to analyse
         top_frequent: Number of top frequently DE genes to return
-        p_value_threshold: P-value threshold for significance
+        p_value_threshold: Adjusted p-value (BH) threshold for significance
         lfc_threshold: Log fold change threshold for significance
 
     Returns:
@@ -917,7 +917,7 @@ def cached_identify_important_genes(
         sorted_contrasts = sorted(selected_contrasts)
 
         logger.info(f"Processing {len(sorted_contrasts)} selected contrasts for gene identification")
-        logger.info(f"Using thresholds: P-value < {p_value_threshold}, |logFC| > {lfc_threshold}")
+        logger.info(f"Using thresholds: adjusted p-value (BH) < {p_value_threshold}, |logFC| > {lfc_threshold}")
 
         # Use business logic module
         top_genes = gene_selection.identify_frequent_degs(

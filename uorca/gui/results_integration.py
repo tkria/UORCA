@@ -45,9 +45,144 @@ from datetime import datetime
 import json
 import math
 
+import textwrap
+from dataclasses import dataclass
+
 # Set up logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
+
+
+# ---------------------------------------------------------------------------
+# p-value columns and labels
+# ---------------------------------------------------------------------------
+
+# limma writes the Benjamini-Hochberg adjusted p-value as ``adj.P.Val`` and the
+# raw p-value as ``P.Value``. Every explorer threshold uses the adjusted one.
+ADJUSTED_P_COLUMN = "adj.P.Val"
+RAW_P_COLUMN = "P.Value"
+ADJUSTED_P_LABEL = "Adjusted p-value (BH)"
+RAW_P_LABEL = "Raw p-value"
+ADJUSTED_P_HELP = "Benjamini-Hochberg adjusted p-value (limma column adj.P.Val)"
+
+
+class MissingAdjustedPValueError(ValueError):
+    """A DEG table has no adjusted p-value column."""
+
+
+def get_adjusted_p_column(df: pd.DataFrame, source: str) -> str:
+    """Return the adjusted p-value column of a DEG table, or raise.
+
+    The raw ``P.Value`` column is never used in its place: a threshold labelled
+    "adjusted" must not silently filter on raw p-values.
+
+    Args:
+        df: DEG table.
+        source: The file or contrast the table came from, named in the error.
+
+    Raises:
+        MissingAdjustedPValueError: if ``adj.P.Val`` is absent.
+    """
+    if ADJUSTED_P_COLUMN in df.columns:
+        return ADJUSTED_P_COLUMN
+    raise MissingAdjustedPValueError(
+        f"{source} has no '{ADJUSTED_P_COLUMN}' column (Benjamini-Hochberg adjusted "
+        f"p-value). UORCA does not substitute the raw '{RAW_P_COLUMN}' column. "
+        f"Columns present: {list(df.columns)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Heatmap contrast labels
+# ---------------------------------------------------------------------------
+
+LABEL_LINE_CHARS = 18
+LABEL_MAX_LINES = 3
+ELLIPSIS = "…"
+HOVER_WRAP_CHARS = 80
+FORMULA_MAX_CHARS = 300
+
+
+@dataclass(frozen=True)
+class ContrastLabel:
+    """A contrast's full name (hover) and its wrapped axis label (display)."""
+    full: str
+    display: str
+
+
+def _split_label_tokens(text: str) -> List[str]:
+    """Split after each '_' or ' ' so that joining the tokens restores the text."""
+    return [t for t in re.split(r"(?<=[_ ])", text) if t]
+
+
+def wrap_contrast_label(text: str,
+                        line_chars: int = LABEL_LINE_CHARS,
+                        max_lines: int = LABEL_MAX_LINES) -> str:
+    """Wrap a contrast name onto at most ``max_lines`` lines joined by ``<br>``.
+
+    Lines break after '_' or ' '. A token longer than a line is split. No
+    character is dropped unless the text needs more than ``max_lines`` lines;
+    then the last line ends in an ellipsis.
+    """
+    lines: List[str] = []
+    current = ""
+    for token in _split_label_tokens(text):
+        while len(token) > line_chars:
+            if current:
+                lines.append(current)
+                current = ""
+            lines.append(token[:line_chars])
+            token = token[line_chars:]
+        if len(current) + len(token) > line_chars:
+            lines.append(current)
+            current = token
+        else:
+            current += token
+    if current:
+        lines.append(current)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        lines[-1] = last[: line_chars - len(ELLIPSIS)] + ELLIPSIS
+    return "<br>".join(lines)
+
+
+def build_contrast_labels(contrasts: List[Tuple[Optional[str], str]]) -> List[ContrastLabel]:
+    """Build full and display labels for heatmap columns.
+
+    Args:
+        contrasts: ``(accession, contrast_name)`` pairs in column order.
+            ``accession`` may be None.
+
+    The accession prefixes the label when the columns span more than one
+    dataset. Display labels are unique: a repeated label gets " (2)", " (3)"...
+    """
+    accessions = {acc for acc, _ in contrasts if acc}
+    prefix = len(accessions) > 1
+    labels: List[ContrastLabel] = []
+    seen: Dict[str, int] = {}
+    for acc, name in contrasts:
+        full = f"{acc}: {name}" if prefix and acc else name
+        display = wrap_contrast_label(full)
+        count = seen.get(display, 0) + 1
+        seen[display] = count
+        if count > 1:
+            display = f"{display} ({count})"
+        labels.append(ContrastLabel(full=full, display=display))
+    return labels
+
+
+def wrap_hover_text(text: str, width: int = HOVER_WRAP_CHARS,
+                    max_chars: Optional[int] = None) -> str:
+    """Wrap text for a Plotly hover box, optionally cutting it with an ellipsis."""
+    text = "" if text is None else str(text)
+    if max_chars is not None and len(text) > max_chars:
+        text = text[:max_chars].rstrip() + ELLIPSIS
+    if not text:
+        return ""
+    return "<br>".join(textwrap.wrap(text, width=width, break_long_words=True,
+                                     break_on_hyphens=False)) or text
 
 
 class ResultsIntegrator:
@@ -71,7 +206,7 @@ class ResultsIntegrator:
         output_dir : str, optional
             Directory where integrated results will be saved
         pvalue_threshold : float
-            P-value threshold for considering genes as differentially expressed
+            Adjusted p-value (BH) threshold for considering genes as differentially expressed
         lfc_threshold : float
             Log fold change threshold for considering genes as differentially expressed
         top_n_genes : int
@@ -94,7 +229,11 @@ class ResultsIntegrator:
         self.analysis_info = {}   # Analysis metadata
         self.deg_data = {}        # DEG data for each contrast
         self.cpm_data = {}        # CPM data for each analysis
-        self.contrast_info = {}   # Information about contrasts
+        self.contrast_info = {}   # Information about contrasts, keyed by name
+        # Contrast information keyed by (analysis_id, contrast_name). Two
+        # datasets can use the same contrast name with different meanings.
+        self.contrast_info_by_analysis: Dict[Tuple[str, str], Dict] = {}
+        self.deg_file_paths: Dict[str, Dict[str, str]] = {}  # analysis_id -> contrast_id -> DEG.csv
 
         logger.info(f"Initialized ResultsIntegrator with results_dir: {self.results_dir}")
 
@@ -280,6 +419,7 @@ class ResultsIntegrator:
 
         # Load contrast information if available
         self.contrast_info = {}
+        self.contrast_info_by_analysis = {}
 
         # Try to load contrasts from each analysis directory as well as global locations
         analysis_folders = self.find_analysis_folders()
@@ -298,11 +438,13 @@ class ResultsIntegrator:
                             if 'name' in row and 'description' in row:
                                 contrast_key = row['name']
                                 # Store the extracted sections
-                                self.contrast_info[contrast_key] = {
+                                entry = {
                                     'name': row['name'],  # Store the original name
                                     'description': row['description'],
                                     'expression': row.get('expression', '')
                                 }
+                                self.contrast_info[contrast_key] = entry
+                                self.contrast_info_by_analysis[(analysis_id, str(contrast_key))] = entry
                         logger.info(f"Loaded contrasts from {contrasts_file}")
                     except Exception as e:
                         logger.warning(f"Error loading contrasts file {contrasts_file}: {str(e)}")
@@ -334,6 +476,7 @@ class ResultsIntegrator:
         self._create_consistent_contrast_names()
 
         # Load DEG data
+        self.deg_file_paths = deg_files
         for analysis_id, contrasts in deg_files.items():
             self.deg_data[analysis_id] = {}
 
@@ -412,7 +555,7 @@ class ResultsIntegrator:
         top_frequent : int
             Number of top frequently occurring genes to select
         p_value_threshold : float, optional
-            P-value threshold for significance (uses instance default if None)
+            Adjusted p-value (BH) threshold for significance (uses instance default if None)
         lfc_threshold : float, optional
             Log fold change threshold for significance (uses instance default if None)
 
@@ -445,24 +588,17 @@ class ResultsIntegrator:
                     logger.warning(f"No 'Gene' column in {contrast_key}")
                     continue
 
-                # Use exact column names from the DEG.csv file
-                # Find adjusted p-value column first, fall back to unadjusted if necessary
-                p_value_col = None
-                if 'adj.P.Val' in df.columns:
-                    p_value_col = 'adj.P.Val'  # Preferred: use adjusted p-value for multiple testing correction
-                    logger.info(f"Using adjusted p-value column 'adj.P.Val' for {contrast_key}")
-                elif 'P.Value' in df.columns:
-                    p_value_col = 'P.Value'  # Fall back to unadjusted p-value if adjusted not available
-                    logger.info(f"Using unadjusted p-value column 'P.Value' for {contrast_key}")
+                # Adjusted p-value (BH) only; raises if the file lacks adj.P.Val
+                p_value_col = get_adjusted_p_column(df, self.deg_source(analysis_id, contrast_id))
 
                 # Use exact column name from the DEG.csv file
                 lfc_col = 'logFC' if 'logFC' in df.columns else None
 
-                if p_value_col is None or lfc_col is None:
+                if lfc_col is None:
                     logger.warning(f"Missing required columns in {contrast_key}. Available columns: {df.columns.tolist()}")
                     continue
 
-                logger.info(f"Using columns for {contrast_key}: p-value={p_value_col}, logFC={lfc_col}")
+                logger.info(f"Using columns for {contrast_key}: adjusted p-value={p_value_col}, logFC={lfc_col}")
 
                 # Filter significant genes
                 sig_df = df[(df[p_value_col] < p_thresh) &
@@ -528,7 +664,7 @@ class ResultsIntegrator:
         output_file : str, optional
             Path to save the interactive HTML output. If None, no file is saved (useful for Streamlit).
         p_value_threshold : float, optional
-            P-value threshold for significance filtering. If None, uses instance default.
+            Adjusted p-value (BH) threshold for significance filtering. If None, uses instance default.
         lfc_threshold : float, optional
             Log fold change threshold for significance filtering. If None, uses instance default.
         hide_empty_rows_cols : bool, optional
@@ -574,22 +710,21 @@ class ResultsIntegrator:
                     contrasts.append((analysis_id, contrast_id))
             logger.info(f"No contrasts specified, using all {len(contrasts)} contrasts")
 
-        # Create simplified contrast labels for display
-        def simplify_contrast_label(analysis_id: str, contrast_id: str) -> str:
-            """Create simplified label for display"""
-            # Try to get original name from contrast_info if available
-            if hasattr(self, "contrast_info") and contrast_id in self.contrast_info:
-                original_name = self.contrast_info[contrast_id].get('name', contrast_id)
-            else:
-                original_name = contrast_id
+        def simplify_contrast_labels(pairs: List[Tuple[str, str]]) -> List[ContrastLabel]:
+            """Full name (hover) and wrapped, unique display label (axis) per contrast."""
+            named = []
+            for analysis_id, contrast_id in pairs:
+                entry = self.get_contrast_entry(analysis_id, contrast_id) or {}
+                name = entry.get('name') or contrast_id
+                accession = self.analysis_info.get(analysis_id, {}).get('accession', analysis_id)
+                named.append((accession, name))
+            return build_contrast_labels(named)
 
-            # Remove dataset prefix and keep it short
-            simplified = original_name.split(":", 1)[-1].split(" –")[0].split(" - ")[0][:25]
-            return simplified
-
-        # Create both full and simplified contrast labels
+        # Internal column keys, plus full and display labels in the same order
         contrast_labels = [f"{a_id}_{c_id}" for a_id, c_id in contrasts]
-        simplified_labels = [simplify_contrast_label(a_id, c_id) for a_id, c_id in contrasts]
+        label_objs = simplify_contrast_labels(contrasts)
+        simplified_labels = [lab.display for lab in label_objs]
+        full_labels = [lab.full for lab in label_objs]
         logger.info(f"Using {len(contrast_labels)} contrast labels: {', '.join(simplified_labels[:5])}{' ...' if len(simplified_labels) > 5 else ''}")
 
         # Extract log fold change values for each gene across contrasts
@@ -617,30 +752,16 @@ class ResultsIntegrator:
                         row[contrast_label] = 0  # Skip this contrast
                         continue
 
-                    # Use exact column names from the DEG.csv file
-                    # Find adjusted p-value column first, fall back to unadjusted if necessary
-                    p_value_col = None
-                    if 'adj.P.Val' in df.columns:
-                        p_value_col = 'adj.P.Val'  # Preferred: use adjusted p-value for multiple testing correction
-                        logger.debug(f"Using adjusted p-value column 'adj.P.Val' for {analysis_id}/{contrast_id}")
-                    elif 'P.Value' in df.columns:
-                        p_value_col = 'P.Value'  # Fall back to unadjusted p-value if adjusted not available
-                        logger.debug(f"Using unadjusted p-value column 'P.Value' for {analysis_id}/{contrast_id}")
-
-                    if p_value_col is None:
-                        logger.warning(f"No p-value column found in {analysis_id}/{contrast_id}")
-                        # Continue anyway, we'll use the log fold change without significance filtering
+                    # Adjusted p-value (BH) only; raises if the file lacks adj.P.Val
+                    p_value_col = get_adjusted_p_column(df, self.deg_source(analysis_id, contrast_id))
 
                     # Find the gene and get its logFC, but set to 0 if not significant
                     gene_row = df[df['Gene'] == gene]
                     if not gene_row.empty:
-                        if p_value_col is not None:
-                            p_value = gene_row.iloc[0][p_value_col]
-                            abs_lfc = abs(gene_row.iloc[0][lfc_col])
-                            if p_value >= p_thresh or abs_lfc <= lfc_thresh:
-                                row[contrast_label] = 0  # Not significant, set to white
-                            else:
-                                row[contrast_label] = gene_row.iloc[0][lfc_col]
+                        p_value = gene_row.iloc[0][p_value_col]
+                        abs_lfc = abs(gene_row.iloc[0][lfc_col])
+                        if p_value >= p_thresh or abs_lfc <= lfc_thresh:
+                            row[contrast_label] = 0  # Not significant, set to white
                         else:
                             row[contrast_label] = gene_row.iloc[0][lfc_col]
                     else:
@@ -741,8 +862,11 @@ class ResultsIntegrator:
                 remaining_contrast_indices = [i for i, label in enumerate(contrast_labels) if label in heatmap_df.columns]
                 contrasts = [contrasts[i] for i in remaining_contrast_indices]
                 # Recompute contrast labels after filtering to keep everything in sync
+                # (labels stay those built for the full set, so the axis matches
+                # what the user selected and numbering stays stable)
+                simplified_labels = [simplified_labels[i] for i in remaining_contrast_indices]
+                full_labels = [full_labels[i] for i in remaining_contrast_indices]
                 contrast_labels = [f"{a_id}_{c_id}" for a_id, c_id in contrasts]
-                simplified_labels = [simplify_contrast_label(a_id, c_id) for a_id, c_id in contrasts]
 
             logger.info(f"After filtering empty rows/columns: {len(heatmap_df)} genes × {len(heatmap_df.columns)} contrasts")
             logger.info(f"Filtered out {len(filtered_genes)} genes and {len(filtered_contrasts)} contrasts with no significant values")
@@ -809,6 +933,7 @@ class ResultsIntegrator:
                 'clustered_genes': clustered_genes,
                 'clustered_contrasts': clustered_contrasts,
                 'simplified_labels': simplified_labels,
+                'full_labels': full_labels,
                 'contrast_labels': contrast_labels,
                 'p_value_threshold': p_thresh,
                 'lfc_threshold': lfc_thresh,
@@ -834,15 +959,19 @@ class ResultsIntegrator:
         # Allow taller figures when many genes, but cap to avoid extreme sizes
         height_px = max(650, min(4500, dynamic_height))
 
-        # Left margin scales with gene label length and font size
-        left_margin = max(250, min(520, int(40 + max_gene_label_len * font_size * 0.7)))
+        # Left margin scales with gene label length and font size; automargin
+        # (set below) grows it further if the tick labels need more room.
+        left_margin = max(80, min(520, int(40 + max_gene_label_len * font_size * 0.7)))
 
         # Create the heatmap
         fig = px.imshow(
             heatmap_df,
             color_continuous_scale='RdBu_r',  # Red-Blue color scale, reversed to match biology convention
             labels=dict(x="Contrast", y="Gene", color="Log2FC"),
-            title="Differential Expression Heatmap (Log2 Fold Change)",
+            title=(
+                "Differential Expression Heatmap (Log2 Fold Change)"
+                f"<br><sup>Coloured cells: {ADJUSTED_P_LABEL} < {p_thresh} and |Log2FC| > {lfc_thresh}</sup>"
+            ),
             aspect="auto",  # Maintain aspect ratio based on data
             height=height_px,
             width=max(700, min(1700, len(heatmap_df.columns) * 90)),  # Dynamic width based on number of contrasts
@@ -853,11 +982,15 @@ class ResultsIntegrator:
 
         # Improve layout
         fig.update_layout(
-            margin=dict(l=left_margin, r=20, t=60, b=120),
+            margin=dict(l=left_margin, r=20, t=80, b=120),
             coloraxis_colorbar=dict(title="Log2FC"),
             font_family="Inter, sans-serif",
             font_size=font_size
         )
+
+        # Let both axes reserve the space their tick labels need
+        fig.update_xaxes(automargin=True)
+        fig.update_yaxes(automargin=True)
 
         # Configure grid lines
         if show_grid_lines:
@@ -894,29 +1027,27 @@ class ResultsIntegrator:
                 # Get accession ID
                 accession = self.analysis_info.get(analysis_id, {}).get('accession', analysis_id)
 
-                # Get simplified name for hover consistency
-                simplified_name = simplified_labels[original_idx]
-                if j == 0 and i == 0:  # Only collect once per contrast
-                    original_contrast_names.append(simplified_name)
+                # Full (unwrapped, untruncated) contrast name for the hover
+                full_name = full_labels[original_idx]
+                if i == 0:  # Only collect once per contrast
+                    original_contrast_names.append(full_name)
 
-                # Get contrast formula/expression if available
-                expression = ""
-                try:
-                    if hasattr(self, "contrast_info") and contrast_id in self.contrast_info:
-                        expression = self.contrast_info[contrast_id].get('expression', '') or ''
-                except Exception:
-                    expression = ''
+                # Contrast formula/expression for this dataset's contrast
+                entry = self.get_contrast_entry(analysis_id, contrast_id) or {}
+                expression = entry.get('expression', '')
+                if not isinstance(expression, str):
+                    expression = ''  # NaN from a blank CSV cell
 
-                # Store description, accession, simplified contrast name, and expression
-                hover_info[i, j, 0] = description
+                # Store description, accession, full contrast name, and expression
+                hover_info[i, j, 0] = wrap_hover_text(description)
                 hover_info[i, j, 1] = accession
-                hover_info[i, j, 2] = simplified_name
-                hover_info[i, j, 3] = expression
+                hover_info[i, j, 2] = full_name
+                hover_info[i, j, 3] = wrap_hover_text(expression, max_chars=FORMULA_MAX_CHARS)
 
         # Update hover template with conditional formatting, accession, and description
         hover_template = (
             "<b>Gene:</b> %{y}<br>" +
-            "<b>Contrast:</b> %{customdata[2]}<br>" +  # Use original contrast name
+            "<b>Contrast:</b> %{customdata[2]}<br>" +  # Full contrast name
             "<b>Log2FC:</b> %{z:.2f}<br>" +
             "<b>Accession:</b> %{customdata[1]}<br>" +
             "<b>Description:</b> %{customdata[0]}<br>" +
@@ -1410,8 +1541,29 @@ class ResultsIntegrator:
 
         return fig
 
+    def deg_source(self, analysis_id: str, contrast_id: str) -> str:
+        """Name the DEG file behind a contrast, for error messages."""
+        path = self.deg_file_paths.get(analysis_id, {}).get(contrast_id)
+        return f"DEG file {path}" if path else f"DEG table for {analysis_id}/{contrast_id}"
+
+    def get_contrast_entry(self, analysis_id: str, contrast_id: str) -> Optional[Dict]:
+        """Return the contrast record for one dataset's contrast, or None.
+
+        Looks up ``(analysis_id, contrast_id)`` first, so two datasets that use
+        the same contrast name keep their own description and formula. Falls
+        back to the name-only table for results without per-dataset metadata.
+        """
+        entry = self.contrast_info_by_analysis.get((analysis_id, contrast_id))
+        if entry is not None:
+            return entry
+        return self.contrast_info.get(contrast_id)
+
     def _get_contrast_description(self, analysis_id: str, contrast_id: str) -> str:
         """Get the description for a contrast from the loaded contrast info."""
+        keyed = self.contrast_info_by_analysis.get((analysis_id, contrast_id))
+        if keyed is not None and isinstance(keyed.get('description'), str) and keyed['description']:
+            return keyed['description']
+
         # Try exact match first
         if hasattr(self, "contrast_info") and contrast_id in self.contrast_info:
             return self.contrast_info[contrast_id].get('description', f"Contrast: {contrast_id}")
@@ -1635,6 +1787,15 @@ class ResultsIntegrator:
         # Update the contrast_info with new consistent names
         self.contrast_info.update(new_contrast_info)
 
+        # analysis_info.json also lists each dataset's contrasts; use it for any
+        # (analysis_id, contrast) pair that had no contrasts.csv row.
+        for (analysis_id, contrast_name), contrast in contrast_analysis_mapping.items():
+            self.contrast_info_by_analysis.setdefault((analysis_id, contrast_name), {
+                'name': contrast_name,
+                'description': contrast.get('description', ''),
+                'expression': contrast.get('expression', ''),
+            })
+
         logger.info(f"Created {len(new_contrast_info)} consistent contrast names")
 
     def create_integrated_report(self,
@@ -1663,7 +1824,7 @@ class ResultsIntegrator:
         max_genes : int
             Maximum number of genes to include in visualizations
         p_value_threshold : float, optional
-            Override the default p-value threshold for gene selection
+            Override the default adjusted p-value (BH) threshold for gene selection
         lfc_threshold : float, optional
             Override the default log fold change threshold for gene selection
         hide_x_labels : bool
@@ -1858,7 +2019,7 @@ def main():
         "--pvalue_threshold",
         type=float,
         default=0.05,
-        help="P-value threshold for considering genes as differentially expressed (default: 0.05)"
+        help="Adjusted p-value (BH) threshold for considering genes as differentially expressed (default: 0.05)"
     )
     parser.add_argument(
         "--lfc_threshold",

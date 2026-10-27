@@ -13,7 +13,23 @@ from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import pdist
 from scipy.stats import zscore
 
+from uorca.gui.results_integration import (
+    ADJUSTED_P_COLUMN,
+    ADJUSTED_P_LABEL,
+    RAW_P_COLUMN,
+    RAW_P_LABEL,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def p_value_label(p_col: str) -> str:
+    """Display name for a limma p-value column."""
+    if p_col == ADJUSTED_P_COLUMN:
+        return ADJUSTED_P_LABEL
+    if p_col == RAW_P_COLUMN:
+        return RAW_P_LABEL
+    raise ValueError(f"'{p_col}' is neither the adjusted nor the raw p-value column; expected '{ADJUSTED_P_COLUMN}' or '{RAW_P_COLUMN}'")
 
 
 
@@ -81,7 +97,12 @@ def create_volcano_plot(
     lfc_thresh: float = 1.0,
     p_thresh: float = 0.05,
 ) -> go.Figure:
-    """Create an interactive volcano plot."""
+    """Create an interactive volcano plot.
+
+    The y-axis title names the p-value kind: adjusted (BH) for ``adj.P.Val``,
+    raw for ``P.Value``.
+    """
+    p_label = p_value_label(p_col)
     df = deg.dropna(subset=[lfc_col, p_col]).copy()
     df["minus_log10_p"] = -np.log10(df[p_col])
 
@@ -100,16 +121,21 @@ def create_volcano_plot(
         color="category",
         hover_name="Gene",
         hover_data={p_col: True, "minus_log10_p": False},
+        labels={p_col: p_label},
         color_discrete_map={
             "Up": "red",
             "Down": "blue",
             "Not significant": "gray",
         },
     )
+    if p_col == ADJUSTED_P_COLUMN:
+        y_title = "-log10(adjusted p-value, BH)"
+    else:
+        y_title = "-log10(raw p-value)"
     fig.update_layout(
         xaxis_title="log2 fold change",
-        yaxis_title="-log10(p value)",
-        legend_title="Gene category",
+        yaxis_title=y_title,
+        legend_title=f"Gene category<br>{p_label}<br>< {p_thresh}, |log2FC| > {lfc_thresh}",
     )
     return fig
 
@@ -143,7 +169,7 @@ def create_ma_plot(
     fig.update_layout(
         xaxis_title="Average log2 expression",
         yaxis_title="log2 fold change",
-        legend_title="Gene category",
+        legend_title=f"Gene category<br>{p_value_label(p_col)}<br>< {p_thresh}, |log2FC| > {lfc_thresh}",
     )
     return fig
 
@@ -186,12 +212,14 @@ def create_deg_heatmap(cpm: pd.DataFrame,
 
     # Filter deg for top N genes by smallest p-value
     if p_col not in deg.columns:
-        logger.warning(f"p-value column '{p_col}' not found in DEG data")
-        return None
+        raise ValueError(
+            f"DEG table has no '{p_col}' column ({p_value_label(p_col)}); "
+            f"cannot rank genes for the heatmap. Columns present: {list(deg.columns)}"
+        )
 
     deg_filtered = deg.dropna(subset=['Gene', p_col])
     if deg_filtered.empty:
-        logger.warning("No DEG rows after filtering missing gene/p-value")
+        logger.warning(f"No DEG rows after dropping rows with a missing gene or {p_col} (adjusted/raw p-value) value")
         return None
 
     top_genes = deg_filtered.nsmallest(top_n, p_col)['Gene'].tolist()
