@@ -1,0 +1,47 @@
+# Expected design and contrasts for GSE132902. Schema: README.md in this folder.
+accession: GSE132902
+status: "draft — owner to confirm"
+drafted: "2026-10-27"
+drafted_by: "Claude agent, from the stored metadata; not reviewed by the owner"
+sources:
+  metadata: results/20261007_PPARg/GSE132902/metadata/GSE132902_metadata.csv
+  current_contrasts: results/20261007_PPARg/GSE132902/metadata/contrasts.csv
+  fixture: tests/fixtures/contrast_design/GSE132902_samples.csv
+research_question_assumed: >-
+  Which genes and pathways depend on PPARG activity? (Effects of losing,
+  inhibiting or restoring PPARG.)
+difficulty: simple
+
+design:
+  # Tissue (4T1 cells) and subtype are constant. 3 vs 3.
+  group_columns: ["characteristics_ch1.2.treatment"]
+  required_blocks: []
+  expected_formula: "~0 + group"
+  expected_residual_df: 4
+  needs_review_expected: false
+
+groups:
+  Roscovitine:
+    characteristics_ch1.2.treatment: "Roscovitine"
+  vehicle:
+    characteristics_ch1.2.treatment: "vehicle"
+
+contrasts:
+  required:
+    # 4T1 TNBC cells, CDK5 inhibitor roscovitine vs vehicle (DMSO). The paper links CDK5 to PPARG phosphorylation, so this is indirect evidence on PPARG.
+    - {target: [Roscovitine], reference: [vehicle], type: main_effect, role: supporting}
+  optional: []
+  not_primary: []
+  must_be_absent: []
+  expected_default: ["Roscovitine - vehicle"]  # the only contrast; default via the "no primary" guard
+
+current_run:
+  formula: "~0 + treatment_group"
+  contrasts: 1
+  required_present: 1  # of 1
+  required_missing: []
+
+owner_to_confirm:
+  - "Role under the assumed question: supporting (indirect PPARG link, so the dataset gets a 'no direct match' flag) or primary?"
+  - "No other contrast is expected; confirm."
+  - "GEO extract protocol mentions retinas although the samples are 4T1 cells (a submitter copy-paste); assumed irrelevant to the design."

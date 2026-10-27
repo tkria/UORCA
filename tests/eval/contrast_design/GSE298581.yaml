@@ -1,0 +1,65 @@
+# Expected design and contrasts for GSE298581. Schema: README.md in this folder.
+accession: GSE298581
+status: "draft — owner to confirm"
+drafted: "2026-10-27"
+drafted_by: "Claude agent, from the stored metadata; not reviewed by the owner"
+sources:
+  metadata: results/20261007_PPARg/GSE298581/metadata/GSE298581_metadata.csv
+  current_contrasts: results/20261007_PPARg/GSE298581/metadata/contrasts.csv
+  fixture: tests/fixtures/contrast_design/GSE298581_samples.csv
+research_question_assumed: >-
+  Which genes and pathways depend on PPARG activity? (Effects of losing,
+  inhibiting or restoring PPARG.)
+difficulty: difficult
+
+design:
+  # 48 samples = 3 cell lines (5637, HT1197, UMUC9) x 4 treatments x 4
+  # replicates, fully balanced (checked in the metadata).
+  group_columns: ["characteristics_ch1.3.treatment"]
+  required_blocks: ["characteristics_ch1.0.cell line"]
+  must_drop:
+    - column: "characteristics_ch1.6.batch"
+      reason_code: single_level
+  not_a_block:
+    - column: "characteristics_ch1.5.replicate"
+      note: "Replicate number 1-4 within each cell line x treatment; assumed not a pairing factor."
+  expected_formula: "~0 + group + characteristics_ch1.0.cell.line"
+  expected_residual_df: 42
+  needs_review_expected: true  # under the current one-factor design
+
+groups:
+  DMSO:
+    characteristics_ch1.3.treatment: "DMSO"
+  T0070907:
+    characteristics_ch1.3.treatment: "0.5 uM T0070907"
+  FTX6746:
+    characteristics_ch1.3.treatment: "0.5 uM FTX-6746"
+  FX909:
+    characteristics_ch1.3.treatment: "0.5 uM FX-909"
+
+contrasts:
+  required:
+    - {target: [T0070907], reference: [DMSO], type: main_effect, role: primary}
+    - {target: [FTX6746], reference: [DMSO], type: main_effect, role: primary}
+    - {target: [FX909], reference: [DMSO], type: main_effect, role: primary}
+  optional:
+    - {target: [T0070907, FTX6746, FX909], reference: [DMSO], type: average, role: supporting}
+  not_primary:
+    - {any_pair_within: [T0070907, FTX6746, FX909], type: perturbation_vs_perturbation, note: "drug vs drug"}
+  must_be_absent: []
+
+current_run:
+  formula: "~0 + treatment_group"
+  residual_df: 44
+  contrasts: 6
+  required_present: 3  # of 3
+  required_missing: []
+  not_primary_present: ["FX909 - T0070907", "FX909 - FTX6746", "FTX6746 - T0070907"]
+  note: >-
+    The contrasts were right; the design was not. Cell-line variance went
+    into the residual because cell line was not a block.
+
+owner_to_confirm:
+  - "Should drug x cell line effects be tested (per-cell-line contrasts or an interaction), or is the additive block design enough? The summary says FX-909 inhibits growth selectively in PPARG-activated lines, so the lines may respond differently."
+  - "Is replicate (1-4) a real pairing factor (for example the same passage across treatments within a cell line)? If yes it should be nested in cell line as a block."
+  - "Are all three inverse agonists primary, or FX-909 only (the clinical compound)?"

@@ -199,3 +199,93 @@ def test_gse295568_on_disk_choice_has_dose_vs_dose_but_no_rescue_vs_knockdown(gs
     for dose in ("12.5", "15"):
         assert ((r[RESCUE.format(dose)],), (r[TSC_SH_PPARG],)) not in pairs
         assert ((r[RESCUE.format(dose)],), (r[TSC_SH_CTRL],)) not in pairs
+
+
+# --- evaluation-set cases (tests/eval/contrast_design) ----------------------
+
+EVAL_DIR = Path(__file__).resolve().parents[1] / "eval" / "contrast_design"
+EVAL_CASES = sorted(p.stem for p in EVAL_DIR.glob("GSE*.yaml"))
+PIPELINE_DESIGN_COLUMNS = {
+    "GSE298581": ["characteristics_ch1.3.treatment"],
+    "GSE295568": [
+        "characteristics_ch1.0.tissue",
+        "characteristics_ch1.1.cell line",
+        "characteristics_ch1.2.cell type",
+        "characteristics_ch1.3.treatment",
+    ],
+    "GSE166308": ["characteristics_ch1.1.genotype"],
+    "GSE324244": ["characteristics_ch1.1.genotype"],
+    "GSE132902": ["characteristics_ch1.2.treatment"],
+}
+
+
+def _load_case(accession: str) -> dict:
+    import yaml
+
+    return yaml.safe_load((EVAL_DIR / f"{accession}.yaml").read_text(encoding="utf-8"))
+
+
+def _group_members(samples: pd.DataFrame, selector: dict) -> pd.Series:
+    mask = pd.Series(True, index=samples.index)
+    for col, value in selector.items():
+        mask &= samples[col].astype(str) == str(value)
+    return mask
+
+
+def _case_pair(item: dict, label_to_r: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    return (
+        tuple(sorted(label_to_r[g] for g in item["target"])),
+        tuple(sorted(label_to_r[g] for g in item["reference"])),
+    )
+
+
+def test_eval_set_has_the_five_cases():
+    assert EVAL_CASES == sorted(PIPELINE_DESIGN_COLUMNS)
+
+
+@pytest.mark.parametrize("accession", EVAL_CASES)
+def test_eval_case_matches_fixture_and_current_run(accession):
+    from uorca.core.review_flags import compute_review_flags
+
+    case = _load_case(accession)
+    assert case["accession"] == accession
+    assert "owner to confirm" in case["status"]
+    samples = pd.read_csv(FIXTURES / f"{accession}_samples.csv")
+
+    # Every group selects samples, groups are disjoint, and each maps to one
+    # level of the run's group column.
+    claimed = pd.Series(0, index=samples.index)
+    label_to_level: dict[str, str] = {}
+    for label, selector in case["groups"].items():
+        members = _group_members(samples, selector)
+        assert members.sum() >= 2, f"{label} selects {members.sum()} samples"
+        claimed += members.astype(int)
+        levels = samples.loc[members, "uorca_group"].unique()
+        assert len(levels) == 1, f"{label} spans run groups {levels}"
+        label_to_level[label] = str(levels[0])
+    assert claimed.max() == 1
+
+    # The expected design is what validate_design produces.
+    design_spec = case["design"]
+    blocks = design_spec["required_blocks"] + [d["column"] for d in design_spec.get("must_drop", [])]
+    design = validate_design(samples, design_spec["group_columns"], blocks)
+    assert design.formula == design_spec["expected_formula"]
+    assert design.residual_df == design_spec["expected_residual_df"]
+    dropped = {d.column: d.reason_code for d in design.dropped_terms}
+    for item in design_spec.get("must_drop", []):
+        assert dropped[item["column"]] == item["reason_code"]
+
+    # The review flag expectation holds for the run's grouping.
+    flags = compute_review_flags(samples, "uorca_group", PIPELINE_DESIGN_COLUMNS[accession])
+    assert flags.needs_review is design_spec["needs_review_expected"]
+
+    # The "before" numbers in current_run match the stored contrasts.
+    contrasts = pd.read_csv(FIXTURES / f"{accession}_contrasts.csv")
+    report = check_contrasts(contrasts, samples["uorca_group"].unique())
+    label_to_r = {lbl: report.level_names[lvl] for lbl, lvl in label_to_level.items()}
+    required = [_case_pair(item, label_to_r) for item in case["contrasts"]["required"]]
+    present = report.pairs()
+    run = case["current_run"]
+    assert run["contrasts"] == len(contrasts)
+    assert sum(p in present for p in required) == run["required_present"]
+    assert len(required) - run["required_present"] == len(run["required_missing"])
