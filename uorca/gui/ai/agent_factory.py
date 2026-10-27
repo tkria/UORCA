@@ -24,7 +24,6 @@ from .config_loader import get_ai_agent_config, get_mcp_server_config
 from uorca.ai_provider import get_model
 
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerStdio
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +41,9 @@ def create_uorca_agent(selected_contrasts_key: str = "") -> Optional[Agent]:
     Args:
         selected_contrasts_key: String representation of selected contrasts for cache invalidation
     """
+    # Imported here, not at module level: `mcp` loads pywin32 at import time on Windows, and a
+    # failure there must not stop the AI tab (or Explore) from loading and showing the error.
+    from pydantic_ai.mcp import MCPServerStdio
 
     # Load configuration
     ai_config = get_ai_agent_config()
