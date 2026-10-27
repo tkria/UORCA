@@ -1,0 +1,8 @@
+GSM,title,characteristics_ch1.0.tissue,characteristics_ch1.1.genotype,characteristics_ch1.2.treatment,uorca_group
+GSM9571712,"liver, WT-CDAHFD, rep1",liver,WT,CDAHFD for 15 weeks,WT
+GSM9571713,"liver, WT-CDAHFD, rep2",liver,WT,CDAHFD for 15 weeks,WT
+GSM9571714,"liver, WT-CDAHFD, rep3",liver,WT,CDAHFD for 15 weeks,WT
+GSM9571715,"liver, WT-CDAHFD, rep4",liver,WT,CDAHFD for 15 weeks,WT
+GSM9571716,"liver, B4-HKO-CDAHFD, rep1",liver,B4galt1-HKO,CDAHFD for 15 weeks,B4galt1-HKO
+GSM9571717,"liver, B4-HKO-CDAHFD, rep2",liver,B4galt1-HKO,CDAHFD for 15 weeks,B4galt1-HKO
+GSM9571718,"liver, B4-HKO-CDAHFD, rep3",liver,B4galt1-HKO,CDAHFD for 15 weeks,B4galt1-HKO
