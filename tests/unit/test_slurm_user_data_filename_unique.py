@@ -34,6 +34,13 @@ def test_unique_sbatch_filename_per_dataset(monkeypatch, tmp_path):
     cfg_a = _write_user_config(tmp_path, "fq_a", "meta_a.csv", shared_out)
     cfg_b = _write_user_config(tmp_path, "fq_b", "meta_b.csv", shared_out)
 
+    import uorca.ai_provider as ai_provider
+
+    # Script generation resolves the AI provider; never read the real ~/.uorca.
+    monkeypatch.delenv("UORCA_AI_PROVIDER", raising=False)
+    monkeypatch.setattr(ai_provider, "CONFIG_PATH", tmp_path / "config.yaml")
+    ai_provider._load_ai_config.cache_clear()
+
     processor = SlurmBatchProcessor.__new__(SlurmBatchProcessor)
 
     fake_default_parameters = {
@@ -51,7 +58,7 @@ def test_unique_sbatch_filename_per_dataset(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kw):
         # Capture the sbatch path before unlink runs.
-        written.append(Path(cmd[1]))
+        written.append(Path(cmd[-1]))
         class R:
             returncode = 0
             stdout = "Submitted batch job 12345"

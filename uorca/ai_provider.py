@@ -511,6 +511,105 @@ def check_provider_credentials(spec: ModelSpec | None = None) -> ModelSpec:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline containers
+# ---------------------------------------------------------------------------
+
+# AWS variables a Bedrock job may need. All are passed by name only.
+AWS_ENV_VARS = (
+    "AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_REGION", "AWS_DEFAULT_REGION",
+)
+
+
+@dataclass(frozen=True)
+class ContainerEnv:
+    """What a pipeline container needs to resolve the same model as the host.
+
+    Attributes:
+        settings: Non-secret settings, passed with their values. With only these set
+            (and no ``~/.uorca/config.yaml``), :func:`resolve_model_spec` inside the
+            container returns the host's spec.
+        secret_names: Names of the variables that hold keys or credentials. They are
+            passed **by name only**, so a value never reaches a command line, a
+            generated script or a log; the container runtime copies each value from
+            the caller's environment.
+        needs_aws_config: True for Bedrock: mount ``~/.aws`` read-only, so profiles and
+            AWS SSO tokens work inside the container.
+    """
+
+    settings: dict[str, str]
+    secret_names: tuple[str, ...]
+    needs_aws_config: bool = False
+
+
+def container_env(spec: ModelSpec | None = None) -> ContainerEnv:
+    """Describe the environment a pipeline container needs for *spec*.
+
+    Args:
+        spec: The resolved spec; defaults to :func:`resolve_model_spec`.
+
+    Raises:
+        ProviderConfigError: The OpenAI-compatible base URL holds ``user:password@``.
+            It would be passed as a plain setting, so the credentials must move to the
+            key variable instead.
+    """
+    if spec is None:
+        spec = resolve_model_spec()
+    provider = spec.provider
+    settings: dict[str, str] = {}
+    secrets: tuple[str, ...] = ()
+
+    if provider in API_KEY_ENV_VARS:
+        settings[UORCA_AI_PROVIDER] = spec.display_name
+        secrets = API_KEY_ENV_VARS[provider]
+    elif provider == "bedrock":
+        settings[UORCA_AI_PROVIDER] = spec.display_name  # full model ID, prefix included
+        if spec.region:
+            settings[UORCA_BEDROCK_REGION] = spec.region
+        if spec.profile:
+            settings[UORCA_BEDROCK_PROFILE] = spec.profile
+        secrets = AWS_ENV_VARS
+    elif provider == "azure":
+        settings.update({
+            UORCA_AI_PROVIDER: "azure",
+            UORCA_AZURE_DEPLOYMENT: spec.model,
+            AZURE_OPENAI_ENDPOINT: spec.endpoint or "",
+            OPENAI_API_VERSION: spec.api_version or "",
+        })
+        secrets = (AZURE_OPENAI_API_KEY,)
+    elif provider == "openai_compatible":
+        base_url = spec.base_url or ""
+        if redact_url(base_url) != base_url:
+            raise ProviderConfigError(
+                f"The OpenAI-compatible base URL {redact_url(base_url)} contains "
+                "credentials. Pipeline containers receive the base URL as a plain "
+                "setting, so put the key in the variable named by "
+                f"{UORCA_OPENAI_COMPATIBLE_API_KEY_ENV} instead."
+            )
+        settings.update({
+            UORCA_AI_PROVIDER: "openai_compatible",
+            UORCA_OPENAI_COMPATIBLE_BASE_URL: base_url,
+            UORCA_OPENAI_COMPATIBLE_MODEL: spec.model,
+        })
+        if spec.api_key_env:
+            settings[UORCA_OPENAI_COMPATIBLE_API_KEY_ENV] = spec.api_key_env
+            secrets = (spec.api_key_env,)
+    elif provider == "google-vertex":
+        settings[UORCA_AI_PROVIDER] = spec.display_name
+        if spec.project:
+            settings[GOOGLE_CLOUD_PROJECT] = spec.project
+        if spec.location:
+            settings[GOOGLE_CLOUD_LOCATION] = spec.location
+        secrets = ("GOOGLE_APPLICATION_CREDENTIALS",)
+    else:  # pragma: no cover - resolve_model_spec only returns supported providers
+        raise ProviderConfigError(f"No container settings for provider {provider!r}.")
+
+    return ContainerEnv(
+        settings=settings, secret_names=secrets, needs_aws_config=provider == "bedrock",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Model factories
 # ---------------------------------------------------------------------------
 

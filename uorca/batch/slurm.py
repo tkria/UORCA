@@ -17,7 +17,10 @@ from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
+from uorca.ai_provider import container_env
+
 from .base import BatchProcessor
+from .container_env import apptainer_aws_bind_shell, apptainer_env_shell, docker_env_shell
 
 
 class SlurmBatchProcessor(BatchProcessor):
@@ -253,7 +256,7 @@ class SlurmBatchProcessor(BatchProcessor):
 
             # Submit job
             result = subprocess.run(
-                ['sbatch', str(script_file)],
+                ['sbatch', '--export=ALL', str(script_file)],
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -331,7 +334,7 @@ class SlurmBatchProcessor(BatchProcessor):
 
             # Submit job
             result = subprocess.run(
-                ['sbatch', str(script_file)],
+                ['sbatch', '--export=ALL', str(script_file)],
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -401,6 +404,8 @@ class SlurmBatchProcessor(BatchProcessor):
         else:
             container_image = params.get('docker_image', 'kevingchen/uorca:0.1.0')
 
+        cenv = container_env()
+
         # Generate job name from config file
         config_name = Path(user_config_path).stem.replace('_config', '').replace('_test', '')
         job_name = f"uorca_{config_name}"[:40]  # SLURM job name limit
@@ -433,6 +438,9 @@ echo "Using temporary directory: ${{TEMP_DIR}}"
 # Bind-mounts for Apptainer (all paths from config)
 BIND="{bind_mounts} \\
       -B ${{TEMP_DIR}}:/tmp"
+{apptainer_aws_bind_shell(cenv)}
+
+{apptainer_env_shell(cenv)}
 
 echo "[$(date)] Starting user data workflow via Apptainer"
 
@@ -441,9 +449,6 @@ apptainer exec \\
   --tmpdir=${{TEMP_DIR}} \\
   --cleanenv \\
   --env SLURM_CPUS_PER_TASK="${{SLURM_CPUS_PER_TASK}}" \\
-  --env OPENAI_API_KEY="${{OPENAI_API_KEY}}" \\
-  --env ENTREZ_EMAIL="${{ENTREZ_EMAIL}}" \\
-  --env ENTREZ_API_KEY="${{ENTREZ_API_KEY}}" \\
   --env LOGFIRE_IGNORE_NO_CONFIG=1 \\
   $CONTAINER_IMAGE \\
   bash -lc "cd {project_root.resolve()} && uv run python -m uorca.graph.runner --config {user_config_abs}"
@@ -489,8 +494,13 @@ rm -rf ${{TEMP_DIR}}
         else:
             container_image = params.get('docker_image', 'kevingchen/uorca:0.1.0')
 
+        cenv = container_env()
+
         # Render template with parameters
         script_content = template.render(
+            apptainer_env=apptainer_env_shell(cenv),
+            apptainer_aws_bind=apptainer_aws_bind_shell(cenv),
+            docker_env=docker_env_shell(cenv),
             accession=accession,
             output_dir=output_dir,
             logs_dir=logs_dir,

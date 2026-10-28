@@ -36,6 +36,11 @@ echo "Running accession=$accession"
 BIND="-B {{ project_root }}:/workspace \
       -B {{ base_output_dir }}:/UORCA_results \
       -B ${TEMP_DIR}:/tmp"
+{{ apptainer_aws_bind }}
+
+# AI provider settings and keys (by name only): render with
+# uorca.batch.container_env.apptainer_env_shell(uorca.ai_provider.container_env()).
+{{ apptainer_env }}
 
 echo "[$(date)] Starting agentic workflow via Apptainer for $accession"
 
