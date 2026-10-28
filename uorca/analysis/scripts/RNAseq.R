@@ -109,10 +109,22 @@ CONTRAST_WEIGHT_TOLERANCE <- 1e-8
 # stop() without the call, so the message is on the 'Error:' line.
 fail <- function(...) stop(..., call. = FALSE)
 
-# R names used in an expression (numbers are not names).
+# An R name in an expression. Letters include non-ASCII ones (\p{L}), which
+# make.names keeps in a UTF-8 locale: GSE295568's levels contain "μ".
+# Numbers are not names.
+NAME_PATTERN <- "(?<![\\p{L}\\p{Nd}._])(?:\\p{L}|\\.(?![0-9]))[\\p{L}\\p{Nd}._]*"
+
 expression_identifiers <- function(expr) {
-    m <- gregexpr("(?<![A-Za-z0-9._])(?:[A-Za-z]|\\.(?![0-9]))[A-Za-z0-9._]*", expr, perl = TRUE)
+    m <- gregexpr(NAME_PATTERN, expr, perl = TRUE)
     unique(regmatches(expr, m)[[1]])
+}
+
+# The expression with every name replaced by a space.
+strip_identifiers <- function(expr) {
+    m <- gregexpr(NAME_PATTERN, expr, perl = TRUE)
+    n <- sum(m[[1]] > 0)
+    if (n > 0) regmatches(expr, m) <- list(rep(" ", n))
+    expr
 }
 
 # Legacy input only: replace raw level text with its make.names form in one
@@ -123,7 +135,7 @@ rewrite_legacy_expression <- function(expr, mapping) {
     changed <- mapping[names(mapping) != unname(mapping)]
     if (length(changed) == 0) return(expr)
     raws <- names(changed)[order(-nchar(names(changed)))]
-    is_name_char <- function(ch) nzchar(ch) && grepl("[A-Za-z0-9._]", ch)
+    is_name_char <- function(ch) nzchar(ch) && grepl("[\\p{L}\\p{Nd}._]", ch, perl = TRUE)
     out <- character(0)
     i <- 1L
     n <- nchar(expr)
@@ -169,10 +181,10 @@ build_contrast_matrix <- function(contrast_names, expressions, design_levels, ma
             if (rewritten != expr) cat("  Legacy rewrite:", expr, " -> ", rewritten, "\n")
             expr <- rewritten
         }
-        if (!grepl("^[A-Za-z0-9._ +*/()-]+$", expr)) {
+        if (!grepl("^[0-9. +*/()-]*$", strip_identifiers(expr))) {
             fail(label, ": only level names, numbers, + - * / and parentheses are allowed.")
         }
-        if (grepl("[A-Za-z0-9._][[:space:]]*\\(", expr)) {
+        if (grepl("[\\p{L}\\p{Nd}._][[:space:]]*\\(", expr, perl = TRUE)) {
             fail(label, ": function calls are not allowed.")
         }
         ids <- expression_identifiers(expr)
@@ -603,7 +615,7 @@ cat("Step 1: Loading metadata from file...\n")
 cat("Loading metadata from:", metadata_file, "\n")
 # check.names = FALSE: headers are used exactly as written (no make.names).
 # na.strings = character(0): a level spelled "NA" stays the string "NA".
-metadata <- read.csv(metadata_file, stringsAsFactors = FALSE,
+metadata <- read.csv(metadata_file, stringsAsFactors = FALSE, encoding = "UTF-8",
                      check.names = FALSE, na.strings = character(0))
 if (nrow(metadata) == 0) {
     stop("Metadata is empty!")
@@ -757,6 +769,7 @@ if (!is.null(contrasts_file)) {
     }
     cat("Loading custom contrasts from CSV file:", contrasts_file, "\n")
     contrasts_df <- read.csv(contrasts_file, stringsAsFactors = FALSE, check.names = FALSE,
+                             encoding = "UTF-8",
                              na.strings = character(0), colClasses = "character")
     if (!all(c("name", "expression") %in% colnames(contrasts_df)) || nrow(contrasts_df) == 0) {
         stop("Contrasts file ", contrasts_file, " needs 'name' and 'expression' columns and ",

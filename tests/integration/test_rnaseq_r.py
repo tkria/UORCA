@@ -380,3 +380,25 @@ def test_bundle_of_old_run_keeps_merged_column(tmp_path):
     assert 'merged_group <- "infection"' in (out / "pkg" / "RNAseq.R").read_text()
     assert _deg(out / "pkg", "SARS_vs_Mock").loc[UP_GENE, "logFC"] == pytest.approx(3.0, abs=0.5)
 
+
+# --- legacy expressions with non-ASCII letters (GSE295568) ------------------
+
+
+def test_gse295568_legacy_contrasts_with_micro_sign_run(tmp_path):
+    """13 of GSE295568's 17 contrasts contain 'μ' and ran on the old script.
+
+    Raw levels and the real contrasts.csv (name and expression columns, equal
+    to results/20261007_PPARg/GSE295568/metadata/contrasts.csv) as a download
+    bundle of that run would pass them.
+    """
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures" / "contrast_design"
+    levels = sorted(pd.read_csv(fixtures / "GSE295568_samples.csv", dtype=str)["uorca_group"].unique())
+    real = pd.read_csv(fixtures / "GSE295568_contrasts.csv", dtype=str)
+    assert sum("μ" in e for e in real["expression"]) == 13
+    args = _write_inputs(
+        tmp_path, levels, group_col="experimental_group", reps=2,
+        contrasts=list(zip(real["name"], real["expression"])),
+    )
+    proc = _run(args, tmp_path)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert _contrast_folders(tmp_path) == {str(n).replace(".", "_") for n in real["name"]}
