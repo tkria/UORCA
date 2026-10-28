@@ -295,3 +295,15 @@ def test_naming_record_refuses_invalid_design():
             level_counts={},
             contrasts=[{"name": "1bad", "expression": "A - B"}],
         )
+
+
+@pytest.mark.parametrize(
+    "gse", sorted(p.name.split("_")[0] for p in FIXTURES.glob("GSE*_samples.csv"))
+)
+def test_every_fixture_dataset_gets_valid_unique_level_names(gse):
+    """Replaces the data tests of the old test_contrast_sanitization.py, which
+    read ../../UORCA_results and skipped silently when it was absent."""
+    levels = _samples(gse)["uorca_group"].unique().tolist()
+    mapping = assign_level_names(levels)
+    _assert_valid_unique(mapping)
+    assert len(mapping) == len(levels)
