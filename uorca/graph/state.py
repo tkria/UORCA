@@ -50,7 +50,9 @@ class WorkflowState:
     # === Execution outputs ===
     abundance_files: Optional[List[str]] = None
     kallisto_index_used: Optional[str] = None
-    kallisto_fastq_dir: Optional[str] = None  # fastq_dir the abundance files came from
+    # Inputs of the completed quantification (FASTQ dir, organism, index and
+    # tx2gene path/size/mtime); Kallisto output is reused only on a match.
+    kallisto_fingerprint: Optional[Dict[str, Any]] = None
     tx2gene_file_used: Optional[str] = None
     sample_mapping_path: Optional[str] = None
     fastq_sample_mapping: Optional[Dict[str, str]] = None  # fastq_prefix -> sample_id

@@ -25,7 +25,7 @@ from uorca.graph.deps import WorkflowDeps
 from uorca.graph.models import MetadataAnalysisOut, ReflectionOut
 from uorca.graph.nodes.contrasts import ContrastDesignNode
 from uorca.graph.nodes.edger import PrepareEdgeRNode
-from uorca.graph.nodes.kallisto import KallistoQuantifyNode
+from uorca.graph.nodes.kallisto import KallistoQuantifyNode, quantification_fingerprint
 from uorca.graph.nodes.metadata import MetadataAnalysisNode
 from uorca.graph.nodes.reflect import ReflectNode
 from uorca.graph.state import CheckpointStatus, WorkflowState
@@ -149,10 +149,14 @@ def _quantified_state(tmp_path: Path) -> WorkflowState:
         f.parent.mkdir(parents=True)
         f.write_text("target_id\tlength\teff_length\test_counts\ttpm\n")
         files.append(str(f))
+    (tmp_path / "index.idx").write_text("index")
+    (tmp_path / "t2g.txt").write_text("t2g")
     state.fastq_dir = str(fastq_dir)
-    state.kallisto_fastq_dir = str(fastq_dir)
+    state.organism = "Homo sapiens"
     state.abundance_files = files
+    state.kallisto_index_used = str(tmp_path / "index.idx")
     state.tx2gene_file_used = str(tmp_path / "t2g.txt")
+    state.kallisto_fingerprint = quantification_fingerprint(state)
     state.update_checkpoint("kallisto_quant", CheckpointStatus.COMPLETED)
     return state
 
@@ -211,7 +215,10 @@ async def _test_naming_retry_does_not_rerun_kallisto(tmp_path):
 
 @pytest.mark.parametrize(
     "change",
-    ["checkpoint", "fastq_dir", "missing_file"],
+    [
+        "checkpoint", "fastq_dir", "missing_file", "organism", "index_path",
+        "index_content", "tx2gene_content", "tx2gene_missing", "no_fingerprint",
+    ],
 )
 def test_kallisto_reuse_is_refused_when_output_is_not_current(tmp_path, change):
     from uorca.graph.nodes.kallisto import _can_reuse_quantification
@@ -222,8 +229,21 @@ def test_kallisto_reuse_is_refused_when_output_is_not_current(tmp_path, change):
         state.checkpoints["kallisto_quant"] = CheckpointStatus.NOT_STARTED
     elif change == "fastq_dir":
         state.fastq_dir = str(tmp_path / "other")
-    else:
+    elif change == "missing_file":
         Path(state.abundance_files[0]).unlink()  # type: ignore[index]
+    elif change == "organism":
+        state.organism = "Mus musculus"
+    elif change == "index_path":
+        (tmp_path / "other.idx").write_text("index")
+        state.kallisto_index_used = str(tmp_path / "other.idx")
+    elif change == "index_content":
+        (tmp_path / "index.idx").write_text("a rebuilt, larger index")
+    elif change == "tx2gene_content":
+        (tmp_path / "t2g.txt").write_text("a different t2g")
+    elif change == "tx2gene_missing":
+        (tmp_path / "t2g.txt").unlink()
+    else:
+        state.kallisto_fingerprint = None
     assert not _can_reuse_quantification(state)
 
 

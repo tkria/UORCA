@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic_graph import BaseNode, GraphRunContext
 
@@ -26,18 +26,46 @@ def _discover_files(resource_dir: Path, pattern: str) -> List[str]:
     return [str(m) for m in matches]
 
 
+def _file_stamp(path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Path, size and modification time of a file, or None if it is missing."""
+    if not path or not Path(path).is_file():
+        return None
+    st = Path(path).stat()
+    return {"path": str(Path(path).resolve()), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+def quantification_fingerprint(state: WorkflowState) -> Dict[str, Any]:
+    """The inputs a Kallisto run depends on, as they are now on disk."""
+    return {
+        "fastq_dir": state.fastq_dir,
+        "organism": state.organism,
+        "index": _file_stamp(state.kallisto_index_used),
+        "tx2gene": _file_stamp(state.tx2gene_file_used),
+    }
+
+
 def _can_reuse_quantification(state: WorkflowState) -> bool:
-    """True when a completed quantification of the current FASTQs exists.
+    """True when a completed quantification of the same inputs exists.
 
     ReflectNode resets only the checkpoint it retries from, so
     ``kallisto_quant`` stays COMPLETED when a retry starts at metadata
     analysis or contrast design, and is reset when the retry targets it.
+    The FASTQ directory, organism, index and tx2gene file (path, size and
+    mtime) must all match what was recorded when Kallisto ran.
     """
     if state.checkpoints.get("kallisto_quant") != CheckpointStatus.COMPLETED:
         return False
-    if not state.abundance_files or not state.tx2gene_file_used:
+    if not state.abundance_files or not state.fastq_dir or not state.kallisto_fingerprint:
         return False
-    if not state.fastq_dir or state.kallisto_fastq_dir != state.fastq_dir:
+    current = quantification_fingerprint(state)
+    if current["index"] is None or current["tx2gene"] is None:
+        return False
+    if current != state.kallisto_fingerprint:
+        logger.info(
+            "Kallisto inputs changed since the last run (recorded %s, now %s); quantifying again.",
+            state.kallisto_fingerprint,
+            current,
+        )
         return False
     missing = [f for f in state.abundance_files if not Path(f).is_file()]
     if missing:
@@ -68,9 +96,9 @@ class KallistoQuantifyNode(BaseNode[WorkflowState, WorkflowDeps, str]):
             # through this node. The FASTQs have not changed, so quantifying
             # again only costs time (GSE210935 spent ~26.6 h this way).
             logger.info(
-                "Reusing Kallisto output from %s (%d abundance files); not re-running "
+                "Reusing Kallisto output for %s (%d abundance files); not re-running "
                 "Kallisto. Retry from 'kallisto_quant' to force quantification.",
-                ctx.state.kallisto_fastq_dir,
+                ctx.state.kallisto_fingerprint,
                 len(ctx.state.abundance_files or []),
             )
             return PrepareEdgeRNode()
@@ -137,7 +165,7 @@ Select the index and tx2gene file that best match the organism "{ctx.state.organ
             ctx.state.abundance_files = kallisto_result.abundance_files
             ctx.state.kallisto_index_used = kallisto_result.index_used
             ctx.state.tx2gene_file_used = kallisto_result.tx2gene_file
-            ctx.state.kallisto_fastq_dir = ctx.state.fastq_dir
+            ctx.state.kallisto_fingerprint = quantification_fingerprint(ctx.state)
 
             if not ctx.state.abundance_files:
                 raise ValueError("Kallisto produced no abundance files")
