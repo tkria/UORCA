@@ -226,10 +226,32 @@ def _scored_df(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _provider_problem() -> str | None:
+    """Why identification cannot call its AI provider, or ``None`` when it can.
+
+    Checks the provider setting and the selected provider's key or credentials before
+    a run starts, so a missing key is not first seen as a failure inside the run.
+    """
+    from uorca.ai_provider import ProviderConfigError, check_provider_credentials
+
+    try:
+        check_provider_credentials()
+    except ProviderConfigError as exc:
+        return str(exc)
+    return None
+
+
 def _render_left_panel(project: Project, task_manager: TaskManager) -> None:
     """Render the input form in the left column."""
 
     st.info(f"**Active Project:** {project.name}")
+
+    provider_problem = _provider_problem()
+    if provider_problem is not None:
+        st.error(
+            f"Identification cannot run with the current AI provider setting. "
+            f"{provider_problem}"
+        )
 
     with st.form("identify_form"):
         query = st.text_area(
@@ -308,10 +330,13 @@ def _render_left_panel(project: Project, task_manager: TaskManager) -> None:
                 )
 
         submitted = st.form_submit_button(
-            "Run Identification", type="primary", use_container_width=True
+            "Run Identification",
+            type="primary",
+            use_container_width=True,
+            disabled=provider_problem is not None,
         )
 
-    if submitted:
+    if submitted and provider_problem is None:
         if not query.strip():
             st.error("Please enter a research question.")
             return

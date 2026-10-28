@@ -63,15 +63,19 @@ def test_incomplete_saved_provider_shows_error(tmp_path):
     assert any("Azure OpenAI deployment name" in e.value for e in at.error)
 
 
-def test_other_provider_is_not_overwritten_without_consent(tmp_path):
-    config = {"ai_provider": {"provider": "anthropic:claude-x"}}
+@pytest.mark.parametrize("saved", ["anthropic:claude-x", "typo"])
+def test_other_provider_is_not_overwritten_without_consent(tmp_path, saved):
+    config = {"ai_provider": {"provider": saved}}
     (tmp_path / "config.yaml").write_text(yaml.dump(config))
     at = _run()
 
-    assert any("'anthropic:claude-x'" in i.value and "only the OpenAI and Bedrock" in i.value
+    assert any(f"'{saved}'" in i.value and "only the OpenAI and Bedrock" in i.value
                for i in at.info)
     assert all(b.disabled for b in _save_buttons(at))
-    assert any("Current model: anthropic:claude-x" in c.value for c in at.caption)
+    if saved == "typo":
+        assert any("Unknown AI provider 'typo'" in e.value for e in at.error)
+    else:
+        assert any("Current model: anthropic:claude-x" in c.value for c in at.caption)
 
     at.checkbox(key="ai_replace_other_provider").check().run()
     buttons = _save_buttons(at)
@@ -79,6 +83,12 @@ def test_other_provider_is_not_overwritten_without_consent(tmp_path):
     buttons[0].click().run()
     saved = yaml.safe_load((tmp_path / "config.yaml").read_text())
     assert saved["ai_provider"]["provider"] == "openai"
+
+    # The page reran: it shows the new state, not the old notices next to "saved".
+    assert at.exception == []
+    assert any("AI provider config saved" in m.value for m in at.success)
+    assert not at.info and not at.error
+    assert any("Current model: openai:gpt-5-mini" in c.value for c in at.caption)
 
 
 def test_openai_and_bedrock_save_as_before(tmp_path):

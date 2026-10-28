@@ -257,10 +257,15 @@ def _render_user_defaults(mgr: ProjectManager) -> None:
     _render_ai_provider_section()
 
 
+_AI_SAVED_KEY = "ai_provider_config_saved"
+
+
 def _render_ai_provider_section() -> None:
     """Render the AI Provider configuration section."""
     st.divider()
     st.subheader("AI Provider")
+    if st.session_state.pop(_AI_SAVED_KEY, False):
+        st.success("AI provider config saved.")
 
     # Load current config to pre-populate fields
     current_config = _load_ai_config()
@@ -316,7 +321,9 @@ def _render_ai_provider_section() -> None:
 
         if st.button("Save AI Config", key="save_ai_config_openai", disabled=not allow_save):
             save_ai_config(provider="openai", openai_model=openai_model)
-            st.success("AI provider config saved.")
+            # Rerun so the page shows the new state, not the old notices.
+            st.session_state[_AI_SAVED_KEY] = True
+            st.rerun()
 
     else:  # bedrock
         col1, col2 = st.columns(2)
@@ -354,7 +361,9 @@ def _render_ai_provider_section() -> None:
                     "profile": bedrock_profile or None,
                 },
             )
-            st.success("AI provider config saved.")
+            # Rerun so the page shows the new state, not the old notices.
+            st.session_state[_AI_SAVED_KEY] = True
+            st.rerun()
 
     if active_model is not None:
         st.caption(f"Current model: {active_model}")
