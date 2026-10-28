@@ -298,3 +298,85 @@ def test_manifest_and_session_info_are_written(tmp_path):
     assert (manifest["n_samples"] == 6).all()
     assert (manifest["n_genes"] > 0).all()
     assert "limma" in (tmp_path / "RNAseqAnalysis" / "sessionInfo.txt").read_text()
+
+
+# --- download bundle (audit §5.5) -------------------------------------------
+
+
+def _bundle_and_run(results_dir: Path, dataset_id: str, out: Path) -> subprocess.CompletedProcess[str]:
+    """Build the R bundle as the explorer does, unzip it and run its RNAseq.R."""
+    import json
+    import zipfile
+
+    from uorca.gui.components.helpers import add_rscript_bundle_to_zip
+
+    zip_path = out / "bundle.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        add_rscript_bundle_to_zip(zf, None, str(results_dir), dataset_id, dataset_id, "pkg")  # type: ignore[arg-type]
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(out)
+    bundle = out / "pkg"
+    assert json.loads((bundle / "metadata" / "analysis_info.json").read_text())["accession"] == dataset_id
+    return subprocess.run(
+        ["Rscript", "RNAseq.R"], capture_output=True, text=True, timeout=600, cwd=bundle,
+        env={**os.environ, "LC_ALL": "en_US.UTF-8"},
+    )
+
+
+def _write_analysis_info(dataset: Path, merged_column: str, contrasts: list[tuple[str, str]]) -> None:
+    import json
+
+    (dataset / "metadata" / "analysis_info.json").write_text(json.dumps({
+        "accession": dataset.name, "organism": "Unknown", "analysis_success": True,
+        "merged_column": merged_column, "unique_groups": [],
+        "contrasts": [{"name": n, "expression": e} for n, e in contrasts],
+    }))
+
+
+def test_bundle_of_new_run_uses_r_level_names(tmp_path):
+    """GSE161060-like: raw levels collide under make.names; the bundle must use uorca_group."""
+    import json
+
+    from uorca.core.naming import assign_level_names, build_naming_record
+
+    pos, neg = "CD45+F4/80+CD11b+EGFP+", "CD45+F4/80+CD11b+EGFP-"
+    names = assign_level_names([neg, pos])
+    contrasts = [("EGFP_pos_vs_EGFP_neg", f"{names[pos]} - {names[neg]}")]
+    dataset = tmp_path / "results" / "GSE000001"
+    dataset.mkdir(parents=True)
+    _write_inputs(
+        dataset, [names[neg], names[pos]], group_col="uorca_group", contrasts=contrasts,
+        up_levels={names[pos]: 8.0}, extra_cols={"cell_type": [neg, pos]},
+    )
+    _write_analysis_info(dataset, "cell_type", contrasts)
+    record = build_naming_record(
+        group_column="cell_type", source_columns=["cell type"], level_names=names,
+        level_counts={pos: 3, neg: 3}, contrasts=[{"name": n, "expression": e} for n, e in contrasts],
+    )
+    (dataset / "metadata" / "naming.json").write_text(json.dumps(record))
+
+    out = tmp_path / "unzipped"
+    out.mkdir()
+    proc = _bundle_and_run(tmp_path / "results", "GSE000001", out)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert 'merged_group <- "uorca_group"' in (out / "pkg" / "RNAseq.R").read_text()
+    deg = _deg(out / "pkg", "EGFP_pos_vs_EGFP_neg")
+    assert deg.loc[UP_GENE, "logFC"] == pytest.approx(3.0, abs=0.5)
+
+
+def test_bundle_of_old_run_keeps_merged_column(tmp_path):
+    """No naming.json: the bundle still uses merged_column and raw expressions."""
+    contrasts = [("SARS_vs_Mock", "SARS-CoV-2 - Mock")]
+    dataset = tmp_path / "results" / "GSE000002"
+    dataset.mkdir(parents=True)
+    _write_inputs(dataset, ["Mock", "SARS-CoV-2"], group_col="infection", contrasts=contrasts,
+                  up_levels={"SARS-CoV-2": 8.0})
+    _write_analysis_info(dataset, "infection", contrasts)
+
+    out = tmp_path / "unzipped"
+    out.mkdir()
+    proc = _bundle_and_run(tmp_path / "results", "GSE000002", out)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert 'merged_group <- "infection"' in (out / "pkg" / "RNAseq.R").read_text()
+    assert _deg(out / "pkg", "SARS_vs_Mock").loc[UP_GENE, "logFC"] == pytest.approx(3.0, abs=0.5)
+
