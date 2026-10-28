@@ -14,16 +14,75 @@ create_plot_output_dirs <- function(output_dir) {
   return(analysis_dir)
 }
 
+# Folder name of a contrast. The rule is unchanged, so existing result folders
+# keep their names; check_contrast_folders() makes sure no two contrasts share
+# a folder.
+contrast_folder <- function(contrast_name) {
+    folder <- gsub("[^a-zA-Z0-9]", "_", contrast_name)
+    if (!grepl("^[A-Za-z0-9_]+$", folder)) {
+        stop("Contrast name '", contrast_name, "' gives an unusable folder name '", folder, "'.",
+             call. = FALSE)
+    }
+    folder
+}
+
+# Stop before any result is written if two contrasts map to one folder
+# (KO.vs.WT and KO_vs_WT, or KO_vs_WT and ko_vs_wt on a case-insensitive file
+# system). Warn about folders with results that this run will not write.
+check_contrast_folders <- function(output_dir, contrast_names) {
+    folders <- vapply(contrast_names, contrast_folder, character(1))
+    key <- tolower(folders)
+    clash <- unique(key[duplicated(key)])
+    if (length(clash) > 0) {
+        groups <- vapply(clash, function(k) paste0("'", contrast_names[key == k], "'", collapse = " and "),
+                         character(1))
+        stop("Contrasts would write to the same folder: ", paste(groups, collapse = "; "),
+             ". Give each contrast a name that differs in more than case or punctuation.",
+             call. = FALSE)
+    }
+    analysis_dir <- file.path(output_dir, "RNAseqAnalysis")
+    existing <- list.dirs(analysis_dir, full.names = FALSE, recursive = FALSE)
+    existing <- existing[file.exists(file.path(analysis_dir, existing, "DEG.csv"))]
+    stale <- setdiff(existing, folders)
+    if (length(stale) > 0) {
+        warning("RNAseqAnalysis has results from an earlier run that this run does not ",
+                "replace: ", paste(stale, collapse = ", "), call. = FALSE, immediate. = TRUE)
+    }
+    reused <- intersect(existing, folders)
+    if (length(reused) > 0) {
+        cat("Overwriting results from an earlier run in:", paste(reused, collapse = ", "), "\n")
+    }
+    invisible(folders)
+}
+
+# Folders whose DEG.csv this run has written; a second write would mean two
+# contrasts share a folder.
+written_contrast_folders <- new.env()
+
 # Function to create a contrast-specific directory
 create_contrast_dir <- function(output_dir, contrast_name) {
-  # Clean contrast name for file system use
-  clean_contrast <- gsub("[^a-zA-Z0-9]", "_", contrast_name)
+    clean_contrast <- contrast_folder(contrast_name)
 
-  # Create contrast-specific directory
-  contrast_dir <- file.path(output_dir, "RNAseqAnalysis", clean_contrast)
-  dir.create(contrast_dir, showWarnings = FALSE, recursive = TRUE)
+    # Create contrast-specific directory
+    contrast_dir <- file.path(output_dir, "RNAseqAnalysis", clean_contrast)
+    dir.create(contrast_dir, showWarnings = FALSE, recursive = TRUE)
 
-  return(contrast_dir)
+    return(contrast_dir)
+}
+
+# Write DEG.csv for one contrast, refusing to overwrite one from this run.
+write_deg_table <- function(top_results, output_dir, contrast_name) {
+    contrast_dir <- create_contrast_dir(output_dir, contrast_name)
+    folder <- basename(contrast_dir)
+    if (exists(tolower(folder), envir = written_contrast_folders, inherits = FALSE)) {
+        stop("Contrast '", contrast_name, "' would overwrite results written earlier in this ",
+             "run to folder '", folder, "'.", call. = FALSE)
+    }
+    assign(tolower(folder), contrast_name, envir = written_contrast_folders)
+    result_file <- file.path(contrast_dir, "DEG.csv")
+    write.csv(top_results, file = result_file, row.names = FALSE)
+    cat("Saved results to:", result_file, "\n")
+    result_file
 }
 
 # --- Contrast checks ----------------------------------------------------------
@@ -676,6 +735,7 @@ if (!is.null(contrasts_file)) {
     )
     cat("Custom contrast matrix:\n")
     print(custom_contrast_matrix)
+    check_contrast_folders(output_dir, colnames(custom_contrast_matrix))
 }
 
 if (!is.null(custom_contrast_matrix)) {
@@ -700,11 +760,7 @@ if (!is.null(custom_contrast_matrix)) {
         top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
 
         # Save results in the contrast-specific directory
-        contrast_name <- colnames(custom_contrast_matrix)[i]
-        contrast_dir <- create_contrast_dir(output_dir, contrast_name)
-        result_file <- file.path(contrast_dir, "DEG.csv")
-        write.csv(top_results, file = result_file, row.names = FALSE)
-        cat("Saved results to:", result_file, "\n")
+        write_deg_table(top_results, output_dir, contrast_name)
     }
 } else {
     # Fall back to default behavior
