@@ -18,8 +18,8 @@ Signals computed here:
 - ``single_sample_group`` (high): a group has fewer than
   ``MIN_REPLICATES_PER_GROUP`` samples, so its variance cannot be estimated.
 - ``many_groups``: more than ``MAX_GROUPS`` groups.
-- ``few_replicates``: a group has fewer than ``MIN_REPLICATES_FOR_CONFIDENCE``
-  (but at least ``MIN_REPLICATES_PER_GROUP``).
+- ``few_replicates`` (medium, one per group): a group has exactly
+  ``WEAK_REPLICATE_COUNT`` (2) replicates.
 - ``unbalanced_groups``: the largest group is more than
   ``MAX_GROUP_SIZE_RATIO`` times the smallest.
 - ``sentence_group_labels``: group labels are long free text rather than
@@ -51,7 +51,9 @@ from .design_validation import (
 )
 
 MAX_GROUPS = 8
-MIN_REPLICATES_FOR_CONFIDENCE = 3
+WEAK_REPLICATE_COUNT = 2
+"""A group with exactly this many samples gets a medium flag (owner rule,
+2026-10-28). Fewer than ``MIN_REPLICATES_PER_GROUP`` is high."""
 MAX_GROUP_SIZE_RATIO = 3.0
 SENTENCE_LABEL_MIN_WORDS = 8
 SENTENCE_LABEL_MIN_CHARS = 60
@@ -218,19 +220,13 @@ def metadata_signals(
                     f"Group {lvl!r} has {n} sample; its variance cannot be estimated.",
                 )
             )
-    small = {
-        lvl: n
-        for lvl, n in sizes.items()
-        if MIN_REPLICATES_PER_GROUP <= n < MIN_REPLICATES_FOR_CONFIDENCE
-    }
-    if small:
-        signals.append(
-            ReviewSignal(
-                "few_replicates", "medium",
-                f"{len(small)} of {len(sizes)} groups have fewer than "
-                f"{MIN_REPLICATES_FOR_CONFIDENCE} replicates (smallest: {min(small.values())}).",
+        elif n == WEAK_REPLICATE_COUNT:
+            signals.append(
+                ReviewSignal(
+                    "few_replicates", "medium",
+                    f"Group {lvl!r} has only {n} replicates; variance estimates are weak.",
+                )
             )
-        )
     largest, smallest = max(sizes.values()), min(sizes.values())
     if largest / smallest > MAX_GROUP_SIZE_RATIO:
         signals.append(

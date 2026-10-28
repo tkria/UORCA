@@ -276,6 +276,8 @@ def test_eval_case_matches_fixture_and_current_run(accession):
 
     # The expected design is what validate_design produces.
     design_spec = case["design"]
+    for name, sources in design_spec.get("derived_columns", {}).items():
+        samples[name] = samples[sources].astype(str).agg("_".join, axis=1)
     blocks = design_spec["required_blocks"] + [d["column"] for d in design_spec.get("must_drop", [])]
     design = validate_design(samples, design_spec["group_columns"], blocks)
     assert design.formula == design_spec["expected_formula"]
@@ -343,3 +345,39 @@ def test_unknown_token_is_still_unknown_level_without_a_fault():
 def test_missing_block_mapping_raises():
     with pytest.raises(ValueError, match=r"no mapping for group levels \['C'\]"):
         check_contrast("c", "A - C", _names(), block_of_group={"batch": {"A": "b1", "B": "b1"}})
+
+
+def test_gse298581_cell_line_effects_section():
+    case = _load_case("GSE298581")
+    spec = case["cell_line_effects"]
+    samples = pd.read_csv(FIXTURES / "GSE298581_samples.csv")
+    for name, sources in case["design"]["derived_columns"].items():
+        samples[name] = samples[sources].astype(str).agg("_".join, axis=1)
+    design = validate_design(samples, spec["group_columns"], spec["blocks"])
+    current = spec["current_validate_design"]
+    assert design.formula == current["formula"]
+    assert design.residual_df == current["residual_df"]
+    assert {d.column: d.reason_code for d in design.dropped_terms} == current["dropped"]
+
+    label_to_level = {}
+    for label, selector in spec["groups"].items():
+        members = _group_members(samples, selector)
+        assert members.sum() == 4
+        levels = {design.sample_groups[i] for i in samples.index[members]}
+        assert len(levels) == 1
+        label_to_level[label] = levels.pop()
+    assert len(set(label_to_level.values())) == 12
+
+    names = level_name_map(design.group_levels)
+    for item in spec["required"]:
+        (t,), (r,) = item["target"], item["reference"]
+        check = check_contrast("c", f"{label_to_level[t]} - {label_to_level[r]}", names)
+        assert check.is_valid and check.shape == "pairwise"
+    # The interaction form is accepted too.
+    inter = check_contrast(
+        "c",
+        f"({label_to_level['FX909_5637']} - {label_to_level['DMSO_5637']}) - "
+        f"({label_to_level['FX909_UMUC9']} - {label_to_level['DMSO_UMUC9']})",
+        names,
+    )
+    assert inter.is_valid and inter.shape == "interaction"

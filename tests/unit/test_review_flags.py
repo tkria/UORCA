@@ -203,3 +203,15 @@ def test_to_dict_is_json_serialisable():
     assert payload["needs_review"] is True
     assert payload["reviewed_by_user"] is False
     assert all({"signal", "severity", "reason"} == set(s) for s in payload["signals"])
+
+
+def test_two_replicate_group_is_medium_with_owner_wording():
+    samples = pd.DataFrame({"g": ["A"] * 3 + ["B"] * 2})
+    flags = compute_review_flags(samples, "g", ["g"])
+    assert [(s.signal, s.severity) for s in flags.signals] == [("few_replicates", "medium")]
+    assert flags.signals[0].reason == "Group 'B' has only 2 replicates; variance estimates are weak."
+    assert not flags.needs_review  # one medium signal
+    samples = pd.DataFrame({"g": ["A"] * 2 + ["B"] * 2})
+    assert compute_review_flags(samples, "g", ["g"]).needs_review  # two medium signals
+    samples = pd.DataFrame({"g": ["A"] * 3 + ["B"] * 3})
+    assert compute_review_flags(samples, "g", ["g"]).signals == []

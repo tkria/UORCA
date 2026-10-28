@@ -15,16 +15,21 @@ difficulty: difficult
 design:
   # 48 samples = 3 cell lines (5637, HT1197, UMUC9) x 4 treatments x 4
   # replicates, fully balanced (checked in the metadata).
+  # Owner, 2026-10-28 (Q2): replicate number is a pairing factor. Each
+  # (cell line, replicate) pair is a block; cell line is nested in it.
+  derived_columns:
+    pair: ["characteristics_ch1.0.cell line", "characteristics_ch1.5.replicate"]  # joined with "_", 12 levels
   group_columns: ["characteristics_ch1.3.treatment"]
-  required_blocks: ["characteristics_ch1.0.cell line"]
+  required_blocks: ["pair"]
   must_drop:
+    - column: "characteristics_ch1.0.cell line"
+      reason_code: implied_by_block  # the pair block already contains it
     - column: "characteristics_ch1.6.batch"
       reason_code: single_level
-  not_a_block:
-    - column: "characteristics_ch1.5.replicate"
-      note: "Replicate number 1-4 within each cell line x treatment; assumed not a pairing factor."
-  expected_formula: "~0 + group + characteristics_ch1.0.cell.line"
-  expected_residual_df: 42
+  expected_formula: "~0 + group + pair"
+  # Verified with validate_design and with R model.matrix + qr: 15 columns,
+  # rank 15, residual df 48 - 4 - 11 = 33.
+  expected_residual_df: 33
   needs_review_expected: true  # under the current one-factor design
 
 groups:
@@ -48,6 +53,47 @@ contrasts:
     - {any_pair_within: [T0070907, FTX6746, FX909], type: perturbation_vs_perturbation, note: "drug vs drug"}
   must_be_absent: []
 
+# Owner, 2026-10-28 (Q1): test drug x cell line effects too.
+# Chosen form: per-cell-line drug-vs-DMSO pairwise contrasts. The contrast
+# checks accept both this form and the interaction form (a four-group
+# +1/+1/-1/-1 contrast, e.g. (FX909_5637 - DMSO_5637) - (FX909_UMUC9 -
+# DMSO_UMUC9)); pairwise was chosen because each contrast reads directly as
+# "the drug effect in this line", and the interactions follow from them.
+cell_line_effects:
+  group_columns: ["characteristics_ch1.3.treatment", "characteristics_ch1.0.cell line"]  # 12 groups
+  blocks: ["pair"]
+  # validate_design today: the pair block is dropped as confounded, because
+  # every pair lies in one cell line and cell line is part of the group, so
+  # whole-block treatment coding of pair is rank-deficient. The intended
+  # design codes pair within cell line (12 group + 9 pair columns, rank 21,
+  # residual df 27, checked with numpy). That needs design_validation and
+  # RNAseq.R support that does not exist yet (escalated).
+  current_validate_design: {formula: "~0 + group", residual_df: 36, dropped: {pair: confounded}}
+  intended_residual_df: 27
+  groups:
+    DMSO_5637: {characteristics_ch1.3.treatment: "DMSO", characteristics_ch1.0.cell line: "5637"}
+    T0070907_5637: {characteristics_ch1.3.treatment: "0.5 uM T0070907", characteristics_ch1.0.cell line: "5637"}
+    FTX6746_5637: {characteristics_ch1.3.treatment: "0.5 uM FTX-6746", characteristics_ch1.0.cell line: "5637"}
+    FX909_5637: {characteristics_ch1.3.treatment: "0.5 uM FX-909", characteristics_ch1.0.cell line: "5637"}
+    DMSO_HT1197: {characteristics_ch1.3.treatment: "DMSO", characteristics_ch1.0.cell line: "HT1197"}
+    T0070907_HT1197: {characteristics_ch1.3.treatment: "0.5 uM T0070907", characteristics_ch1.0.cell line: "HT1197"}
+    FTX6746_HT1197: {characteristics_ch1.3.treatment: "0.5 uM FTX-6746", characteristics_ch1.0.cell line: "HT1197"}
+    FX909_HT1197: {characteristics_ch1.3.treatment: "0.5 uM FX-909", characteristics_ch1.0.cell line: "HT1197"}
+    DMSO_UMUC9: {characteristics_ch1.3.treatment: "DMSO", characteristics_ch1.0.cell line: "UMUC9"}
+    T0070907_UMUC9: {characteristics_ch1.3.treatment: "0.5 uM T0070907", characteristics_ch1.0.cell line: "UMUC9"}
+    FTX6746_UMUC9: {characteristics_ch1.3.treatment: "0.5 uM FTX-6746", characteristics_ch1.0.cell line: "UMUC9"}
+    FX909_UMUC9: {characteristics_ch1.3.treatment: "0.5 uM FX-909", characteristics_ch1.0.cell line: "UMUC9"}
+  required:
+    - {target: [T0070907_5637], reference: [DMSO_5637], type: main_effect, role: supporting}
+    - {target: [FTX6746_5637], reference: [DMSO_5637], type: main_effect, role: supporting}
+    - {target: [FX909_5637], reference: [DMSO_5637], type: main_effect, role: supporting}
+    - {target: [T0070907_HT1197], reference: [DMSO_HT1197], type: main_effect, role: supporting}
+    - {target: [FTX6746_HT1197], reference: [DMSO_HT1197], type: main_effect, role: supporting}
+    - {target: [FX909_HT1197], reference: [DMSO_HT1197], type: main_effect, role: supporting}
+    - {target: [T0070907_UMUC9], reference: [DMSO_UMUC9], type: main_effect, role: supporting}
+    - {target: [FTX6746_UMUC9], reference: [DMSO_UMUC9], type: main_effect, role: supporting}
+    - {target: [FX909_UMUC9], reference: [DMSO_UMUC9], type: main_effect, role: supporting}
+
 current_run:
   formula: "~0 + treatment_group"
   residual_df: 44
@@ -59,7 +105,10 @@ current_run:
     The contrasts were right; the design was not. Cell-line variance went
     into the residual because cell line was not a block.
 
+owner_answers:  # 2026-10-28
+  Q1: "Test drug x cell line effects: added as per-cell-line contrasts (cell_line_effects)."
+  Q2: "Replicate is a pairing factor: pair = cell line x replicate is the block."
+  Q3: "All three drug-vs-DMSO contrasts stay required, primary and default."
+
 owner_to_confirm:
-  - "Should drug x cell line effects be tested (per-cell-line contrasts or an interaction), or is the additive block design enough? The summary says FX-909 inhibits growth selectively in PPARG-activated lines, so the lines may respond differently."
-  - "Is replicate (1-4) a real pairing factor (for example the same passage across treatments within a cell line)? If yes it should be nested in cell line as a block."
-  - "Are all three inverse agonists primary, or FX-909 only (the clinical compound)?"
+  - "Role of the per-cell-line contrasts: supporting (as drafted) or primary?"

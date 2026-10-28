@@ -11,7 +11,7 @@ case states the question it assumes in `research_question_assumed`.
 
 | Case | Difficulty | Point of the case |
 |---|---|---|
-| GSE298581 | difficult | Needs a `cell_line` block: `~0 + group + cell line`, 42 residual df |
+| GSE298581 | difficult | Needs a (cell line, replicate) `pair` block: `~0 + group + pair`, 33 residual df (owner, 2026-10-28) |
 | GSE295568 | difficult | Batch must be dropped (groups nested in batch); rescue arms vs shPPARG are primary |
 | GSE166308 | simple | Two groups, one contrast |
 | GSE324244 | simple | Two groups, one contrast |
@@ -26,6 +26,11 @@ case states the question it assumes in `research_question_assumed`.
   `uorca.core.design_validation`), `expected_formula` (as `validate_design` writes it),
   `expected_residual_df`, and `needs_review_expected` (for `uorca.core.review_flags`, under the
   current pipeline's grouping).
+- `design.derived_columns`: columns built before validation by joining source columns with
+  `"_"` (GSE298581: `pair` = cell line x replicate).
+- `cell_line_effects` (GSE298581 only): a second analysis with its own groups, blocks and
+  required contrasts, and what `validate_design` produces for it today.
+- `owner_answers`: answers the owner gave to earlier `owner_to_confirm` points.
 - `contrasts.required`: each item has `target` and `reference` (lists of group labels; more
   than one label means an equal-weight average), a `type` (the `contrast_type` values of plan
   section 3.2) and the expected `role` (`primary`, `supporting`, `not_relevant`; plan section
