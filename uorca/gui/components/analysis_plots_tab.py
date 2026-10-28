@@ -670,7 +670,7 @@ def _render_deg_table(selected_dataset: str, selected_contrast: str, contrast_pa
                         help="Raw (unadjusted) p-value (limma column P.Value)"
                     )
                 except:
-                    st.warning("Could not convert P.Value to numeric format for sorting.")
+                    st.warning("Could not convert the raw p-value column (P.Value) to numeric format for sorting.")
 
             if 'logFC' in display_df.columns:
                 column_config['logFC'] = st.column_config.NumberColumn(

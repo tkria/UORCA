@@ -1,6 +1,7 @@
 """Tests for data_formatters module."""
 import pytest
 import pandas as pd
+from uorca.core.pvalues import MissingAdjustedPValueError
 from uorca.core.data_formatters import (
     sort_by_geo_accession,
     create_contrast_table_data,
@@ -206,14 +207,11 @@ def test_create_contrast_info_table_missing_columns(sample_analysis_info):
         }
     }
 
-    result = create_contrast_info_table(
-        analysis_info=sample_analysis_info,
-        deg_data=bad_deg_data,
-        pvalue_thresh=0.05,
-        lfc_thresh=1.0
-    )
-
-    # Should handle gracefully
-    assert not result.empty
-    assert result['Significant DEGs'].values[0] == 0
-    assert result['Total Genes'].values[0] == 2
+    # A table without adj.P.Val fails loudly instead of reporting 0 DEGs
+    with pytest.raises(MissingAdjustedPValueError, match="Treatment_vs_Control"):
+        create_contrast_info_table(
+            analysis_info=sample_analysis_info,
+            deg_data=bad_deg_data,
+            pvalue_thresh=0.05,
+            lfc_thresh=1.0
+        )

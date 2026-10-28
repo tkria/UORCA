@@ -57,7 +57,7 @@ server = FastMCP("UORCA-Tools")
 def load_long_table(results_dir: str) -> pd.DataFrame:
     """
     Build a DataFrame with one row per (analysis_id, contrast_id, gene)
-    with columns: analysis_id, contrast_id, Gene, logFC, pvalue, AveExpr.
+    with columns: analysis_id, contrast_id, Gene, logFC, ``pvalue`` (adjusted), AveExpr.
 
     ``pvalue`` holds the Benjamini-Hochberg adjusted p-value (limma
     ``adj.P.Val``). A DEG file without ``adj.P.Val`` raises; the raw
@@ -225,7 +225,7 @@ async def get_gene_contrast_stats(genes: list, contrast_ids: list = None) -> str
 
     Returns:
         JSON string with gene statistics across contrasts (long format with gene and contrast columns;
-        the pvalue field is the adjusted p-value, BH)
+        the ``pvalue`` field is the adjusted p-value, BH)
     """
     df = get_filtered_dataframe()
     df = df[df.Gene.isin(genes)]

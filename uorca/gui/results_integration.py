@@ -37,7 +37,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import scipy.cluster.hierarchy as sch
 from scipy.spatial.distance import pdist
-from typing import List, Dict, Tuple, Optional, Union, Set
+from typing import List, Dict, Tuple, Optional, Union, Set, Sequence
 import logging
 import re
 from pathlib import Path
@@ -47,6 +47,18 @@ import math
 
 import textwrap
 from dataclasses import dataclass
+import html
+
+# p-value columns and labels live in uorca.core.pvalues; re-exported for the GUI.
+from uorca.core.pvalues import (
+    ADJUSTED_P_COLUMN,
+    ADJUSTED_P_HELP,
+    ADJUSTED_P_LABEL,
+    RAW_P_COLUMN,
+    RAW_P_LABEL,
+    MissingAdjustedPValueError,
+    get_adjusted_p_column,
+)
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -54,50 +66,11 @@ logger.setLevel(logging.WARNING)
 
 
 # ---------------------------------------------------------------------------
-# p-value columns and labels
-# ---------------------------------------------------------------------------
-
-# limma writes the Benjamini-Hochberg adjusted p-value as ``adj.P.Val`` and the
-# raw p-value as ``P.Value``. Every explorer threshold uses the adjusted one.
-ADJUSTED_P_COLUMN = "adj.P.Val"
-RAW_P_COLUMN = "P.Value"
-ADJUSTED_P_LABEL = "Adjusted p-value (BH)"
-RAW_P_LABEL = "Raw p-value"
-ADJUSTED_P_HELP = "Benjamini-Hochberg adjusted p-value (limma column adj.P.Val)"
-
-
-class MissingAdjustedPValueError(ValueError):
-    """A DEG table has no adjusted p-value column."""
-
-
-def get_adjusted_p_column(df: pd.DataFrame, source: str) -> str:
-    """Return the adjusted p-value column of a DEG table, or raise.
-
-    The raw ``P.Value`` column is never used in its place: a threshold labelled
-    "adjusted" must not silently filter on raw p-values.
-
-    Args:
-        df: DEG table.
-        source: The file or contrast the table came from, named in the error.
-
-    Raises:
-        MissingAdjustedPValueError: if ``adj.P.Val`` is absent.
-    """
-    if ADJUSTED_P_COLUMN in df.columns:
-        return ADJUSTED_P_COLUMN
-    raise MissingAdjustedPValueError(
-        f"{source} has no '{ADJUSTED_P_COLUMN}' column (Benjamini-Hochberg adjusted "
-        f"p-value). UORCA does not substitute the raw '{RAW_P_COLUMN}' column. "
-        f"Columns present: {list(df.columns)}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Heatmap contrast labels
 # ---------------------------------------------------------------------------
 
-LABEL_LINE_CHARS = 18
-LABEL_MAX_LINES = 3
+LABEL_LINE_CHARS = 30  # vertical tick labels: height is cheap, width is not
+LABEL_MAX_LINES = 2   # plus one accession line when several datasets are shown
 ELLIPSIS = "…"
 HOVER_WRAP_CHARS = 80
 FORMULA_MAX_CHARS = 300
@@ -122,7 +95,8 @@ def wrap_contrast_label(text: str,
 
     Lines break after '_' or ' '. A token longer than a line is split. No
     character is dropped unless the text needs more than ``max_lines`` lines;
-    then the last line ends in an ellipsis.
+    then the last line ends in an ellipsis. Each line is HTML-escaped after
+    wrapping, so a name containing '<' or '&' cannot inject Plotly markup.
     """
     lines: List[str] = []
     current = ""
@@ -145,44 +119,61 @@ def wrap_contrast_label(text: str,
         lines = lines[:max_lines]
         last = lines[-1]
         lines[-1] = last[: line_chars - len(ELLIPSIS)] + ELLIPSIS
-    return "<br>".join(lines)
+    return "<br>".join(html.escape(line, quote=False) for line in lines)
 
 
-def build_contrast_labels(contrasts: List[Tuple[Optional[str], str]]) -> List[ContrastLabel]:
+def build_contrast_labels(contrasts: Sequence[Tuple[Optional[str], str]]) -> List[ContrastLabel]:
     """Build full and display labels for heatmap columns.
 
     Args:
         contrasts: ``(accession, contrast_name)`` pairs in column order.
             ``accession`` may be None.
 
-    The accession prefixes the label when the columns span more than one
-    dataset. Display labels are unique: a repeated label gets " (2)", " (3)"...
+    When the columns span more than one dataset, the accession goes on its own
+    first line of the display label, so it takes no characters from the
+    contrast name's three lines; the full name is "ACCESSION: name".
+
+    Display labels are unique: a label already used gets the lowest free
+    " (n)" suffix, checked against every label, so ["a (2)", "a", "a"] gives
+    "a (2)", "a", "a (3)".
+
+    ``full`` is plain text; ``display`` is HTML-escaped Plotly tick text.
     """
     accessions = {acc for acc, _ in contrasts if acc}
     prefix = len(accessions) > 1
     labels: List[ContrastLabel] = []
-    seen: Dict[str, int] = {}
+    used: Set[str] = set()
     for acc, name in contrasts:
-        full = f"{acc}: {name}" if prefix and acc else name
-        display = wrap_contrast_label(full)
-        count = seen.get(display, 0) + 1
-        seen[display] = count
-        if count > 1:
-            display = f"{display} ({count})"
-        labels.append(ContrastLabel(full=full, display=display))
+        if prefix and acc:
+            full = f"{acc}: {name}"
+            display = html.escape(acc, quote=False) + "<br>" + wrap_contrast_label(name)
+        else:
+            full = name
+            display = wrap_contrast_label(name)
+        candidate = display
+        n = 2
+        while candidate in used:
+            candidate = f"{display} ({n})"
+            n += 1
+        used.add(candidate)
+        labels.append(ContrastLabel(full=full, display=candidate))
     return labels
 
 
 def wrap_hover_text(text: str, width: int = HOVER_WRAP_CHARS,
                     max_chars: Optional[int] = None) -> str:
-    """Wrap text for a Plotly hover box, optionally cutting it with an ellipsis."""
+    """Wrap text for a Plotly hover box, optionally cutting it with an ellipsis.
+
+    Lines are HTML-escaped after wrapping, so the text cannot inject markup.
+    """
     text = "" if text is None else str(text)
     if max_chars is not None and len(text) > max_chars:
         text = text[:max_chars].rstrip() + ELLIPSIS
     if not text:
         return ""
-    return "<br>".join(textwrap.wrap(text, width=width, break_long_words=True,
-                                     break_on_hyphens=False)) or text
+    lines = textwrap.wrap(text, width=width, break_long_words=True,
+                          break_on_hyphens=False) or [text]
+    return "<br>".join(html.escape(line, quote=False) for line in lines)
 
 
 class ResultsIntegrator:
@@ -1040,8 +1031,8 @@ class ResultsIntegrator:
 
                 # Store description, accession, full contrast name, and expression
                 hover_info[i, j, 0] = wrap_hover_text(description)
-                hover_info[i, j, 1] = accession
-                hover_info[i, j, 2] = full_name
+                hover_info[i, j, 1] = html.escape(str(accession), quote=False)
+                hover_info[i, j, 2] = html.escape(full_name, quote=False)
                 hover_info[i, j, 3] = wrap_hover_text(expression, max_chars=FORMULA_MAX_CHARS)
 
         # Update hover template with conditional formatting, accession, and description
@@ -1081,8 +1072,10 @@ class ResultsIntegrator:
                 tickmode="array",
                 tickvals=tick_vals,
                 ticktext=clustered_simplified_labels,
-                tickangle=45,
-                title="Biological contrast"
+                # Vertical labels: each wrapped line becomes a narrow column,
+                # so neighbouring multi-line labels do not overlap
+                tickangle=-90,
+                title=dict(text="Biological contrast", standoff=20)
             )
 
         # Save to file if specified

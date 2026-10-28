@@ -10,6 +10,8 @@
 # macOS/Linux: use download_orthologues.sh instead.
 
 $ErrorActionPreference = 'Stop'
+# The progress bar makes Invoke-WebRequest very slow on Windows PowerShell 5.1
+$ProgressPreference = 'SilentlyContinue'
 
 $Url = 'https://raw.githubusercontent.com/AllenInstitute/GeneOrthology/dd9e22dd03ef60cf418d1fff04690ab8fbd99f2c/csv/mammalian_orthologs_20231113.csv'
 $ExpectedSha256 = '9989602d1815885c462f029d362bcf518af3390ba167f2a8b1ceb707a67281cf'
@@ -36,7 +38,9 @@ try {
     Write-Host "Wrote $Target"
 }
 catch {
-    Write-Error "Orthologue download failed: $_"
+    # Write-Error would itself throw under ErrorActionPreference Stop and skip
+    # the exit code; write to stderr directly, then exit 1.
+    [Console]::Error.WriteLine("Error: orthologue download failed: $_")
     exit 1
 }
 finally {

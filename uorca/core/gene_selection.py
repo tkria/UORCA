@@ -3,6 +3,8 @@ import pandas as pd
 from typing import Dict, List, Tuple, Set
 import logging
 
+from uorca.core.pvalues import get_adjusted_p_column
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,7 +22,7 @@ def identify_frequent_degs(
         deg_data: DEG data dict (analysis_id -> contrast_id -> DataFrame)
         contrasts: List of (analysis_id, contrast_id) tuples to analyze
         top_n: Number of top genes to return
-        p_thresh: P-value threshold for significance
+        p_thresh: Adjusted p-value (BH) threshold for significance
         lfc_thresh: Log fold-change threshold
 
     Returns:
@@ -33,10 +35,13 @@ def identify_frequent_degs(
         if analysis_id in deg_data and contrast_id in deg_data[analysis_id]:
             deg_df = deg_data[analysis_id][contrast_id]
 
+            # Adjusted p-value (BH) only; raises if the table lacks adj.P.Val
+            p_col = get_adjusted_p_column(deg_df, f"DEG table for {analysis_id}/{contrast_id}")
+
             # Filter for significant genes
-            if 'adj.P.Val' in deg_df.columns and 'logFC' in deg_df.columns and 'Gene' in deg_df.columns:
+            if 'logFC' in deg_df.columns and 'Gene' in deg_df.columns:
                 significant_genes = deg_df[
-                    (deg_df['adj.P.Val'] < p_thresh) &
+                    (deg_df[p_col] < p_thresh) &
                     (abs(deg_df['logFC']) > lfc_thresh)
                 ]['Gene'].tolist()
 

@@ -5,6 +5,7 @@ GSE295568 contrasts from the PPARg results, six of which are longer than the
 25 characters the old label code kept.
 """
 
+import html
 import json
 from pathlib import Path
 
@@ -43,12 +44,12 @@ GSE295568_CONTRASTS = [
 
 
 def _flatten(display: str) -> str:
-    """Join a display label's lines back into one string."""
-    return display.replace("<br>", "")
+    """Join a display label's lines back into one plain-text string."""
+    return html.unescape(display.replace("<br>", ""))
 
 
 def _assert_well_formed(display: str, full: str) -> None:
-    lines = display.split("<br>")
+    lines = [html.unescape(line) for line in display.split("<br>")]
     assert len(lines) <= LABEL_MAX_LINES, display
     for line in lines:
         assert len(line) <= LABEL_LINE_CHARS, (line, display)
@@ -73,7 +74,7 @@ def test_gse295568_labels_are_unique_and_at_most_three_lines():
 
 @pytest.mark.unit
 def test_gse295568_long_names_are_not_truncated():
-    """Every GSE295568 name fits in three 18-character lines, so none needs an ellipsis."""
+    """Every GSE295568 name fits in the label's line budget, so none needs an ellipsis."""
     labels = build_contrast_labels([(None, name) for name in GSE295568_CONTRASTS])
     for lab in labels:
         assert ELLIPSIS not in lab.display
@@ -114,15 +115,46 @@ def test_accession_prefix_added_when_more_than_one_dataset():
     assert labels[0].full == "GSE295568: PPARG_KD1_EVT_vs_control"
     assert labels[1].full == "GSE298581: PPARG_KD1_EVT_vs_control"
     assert labels[0].display != labels[1].display
-    for lab in labels:
-        _assert_well_formed(lab.display, lab.full)
-        assert lab.display.startswith("GSE")
+
+
+@pytest.mark.unit
+def test_multi_dataset_labels_lose_no_characters():
+    """The accession takes its own line; the contrast name keeps its full line budget."""
+    pairs = [("GSE295568", n) for n in GSE295568_CONTRASTS] + [
+        ("GSE298581", "T0070907_vs_DMSO"), ("GSE298581", "FTX6746_vs_DMSO")]
+    labels = build_contrast_labels(pairs)
+    displays = [lab.display for lab in labels]
+    assert len(set(displays)) == len(displays)
+    for lab, (acc, name) in zip(labels, pairs):
+        accession_line, _, name_part = lab.display.partition("<br>")
+        assert accession_line == acc
+        _assert_well_formed(name_part, name)
+        assert ELLIPSIS not in lab.display
+        assert _flatten(name_part) == name
 
 
 @pytest.mark.unit
 def test_no_accession_prefix_for_a_single_dataset():
     labels = build_contrast_labels([("GSE295568", name) for name in GSE295568_CONTRASTS])
     assert all(not lab.full.startswith("GSE295568") for lab in labels)
+
+
+@pytest.mark.unit
+def test_numbering_never_creates_a_duplicate():
+    labels = build_contrast_labels([(None, "a (2)"), (None, "a"), (None, "a")])
+    displays = [lab.display for lab in labels]
+    assert displays == ["a (2)", "a", "a (3)"]
+
+
+@pytest.mark.unit
+def test_html_in_names_and_hover_is_escaped():
+    labels = build_contrast_labels([(None, "<b>x</b>_&_vs_ctrl")])
+    assert "<b>" not in labels[0].display
+    assert "&lt;b&gt;" in labels[0].display
+    assert labels[0].full == "<b>x</b>_&_vs_ctrl"
+    hover = wrap_hover_text("A <script>alert(1)</script> & B")
+    assert "<script>" not in hover
+    assert "&lt;script&gt;" in hover and "&amp;" in hover
 
 
 @pytest.mark.unit

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def p_value_label(p_col: str) -> str:
-    """Display name for a limma p-value column."""
+    """Display name for a limma raw or adjusted p-value column."""
     if p_col == ADJUSTED_P_COLUMN:
         return ADJUSTED_P_LABEL
     if p_col == RAW_P_COLUMN:
@@ -190,7 +190,7 @@ def create_deg_heatmap(cpm: pd.DataFrame,
     cpm : pd.DataFrame
         CPM expression DataFrame, with genes as index and samples as columns
     deg : pd.DataFrame
-        DEG results DataFrame with at least columns 'Gene' and p-value (e.g., 'adj.P.Val')
+        DEG results DataFrame with at least columns 'Gene' and an adjusted p-value column (e.g., 'adj.P.Val')
     group_labels : Optional[pd.Series]
         Mapping from sample names to biological group labels
     p_col : str

@@ -31,7 +31,6 @@ from uorca.gui.ai import (
     run_contrast_relevance_with_selection,
     SelectedContrast
 )
-from uorca.gui.mcp_server import get_filtered_dataframe
 
 from .helpers import (
     check_ai_generating,
@@ -1342,6 +1341,8 @@ def _display_unified_ai_results(
 
             # AI agent's working dataset
             try:
+                # Imported here so the AI tab loads without the mcp package
+                from uorca.gui.mcp_server import get_filtered_dataframe
                 filtered_df = get_filtered_dataframe()
 
                 if not filtered_df.empty:
