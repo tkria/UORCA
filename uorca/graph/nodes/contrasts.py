@@ -11,7 +11,7 @@ import pandas as pd
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_graph import BaseNode, GraphRunContext
 
-from uorca.core.naming import NamingError, build_naming_record
+from uorca.core.naming import NamingError, build_naming_record, normalise_contrasts
 
 from ..agents import contrast_design_agent
 from ..deps import WorkflowDeps
@@ -93,7 +93,8 @@ Design biologically meaningful contrasts that:
                     ) from exc
                 raise
 
-            contrasts = [c.model_dump() for c in result.output.contrasts]
+            # Same whitespace as was validated, so R reads what Python checked.
+            contrasts = normalise_contrasts([c.model_dump() for c in result.output.contrasts])
 
             # Deterministic gate before Kallisto: the output validator has
             # already asked the model to fix these, so any issue left is a

@@ -105,7 +105,7 @@ async def _test_gse210935_contrast_node_retries_bad_design_before_kallisto(tmp_p
     original = pd.read_csv(FIXTURES / "GSE210935_contrasts.csv").to_dict(orient="records")
     fixed = [
         {"name": "GMIL4_vs_GM_8h", "expression": f"{names['8h_GMIL4']} - {names['8h_GM']}"},
-        {"name": "MoDC_GMT_vs_MoDC_GMIL4", "expression": "MoDC_GMT - MoDC_GMIL4"},
+        {"name": "MoDC_GMT_vs_MoDC_GMIL4", "expression": "MoDC_GMT\n-\u00a0MoDC_GMIL4"},
     ]
     model, calls = _contrast_model([original, fixed])
 
@@ -119,7 +119,7 @@ async def _test_gse210935_contrast_node_retries_bad_design_before_kallisto(tmp_p
     assert record["contrasts"][0]["weights"] == {"X8h_GMIL4": 1.0, "X8h_GM": -1.0}
     assert {lv["r_name"] for lv in record["levels"]} == set(names.values())
     saved = pd.read_csv(tmp_path / "metadata" / "contrasts.csv")
-    assert saved["expression"].tolist()[0] == "X8h_GMIL4 - X8h_GM"
+    assert saved["expression"].tolist() == ["X8h_GMIL4 - X8h_GM", "MoDC_GMT - MoDC_GMIL4"]
 
 
 async def _test_persistently_bad_design_fails_early_with_clear_message(tmp_path):

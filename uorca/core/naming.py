@@ -233,6 +233,26 @@ def _suggest_contrast_name(name: str) -> str:
     return s
 
 
+def normalise_expression(expression: str) -> str:
+    """Collapse every run of whitespace to one ASCII space and strip the ends.
+
+    ``str.split()`` splits on all Unicode whitespace (newline, tab, carriage
+    return, non-breaking space). RNAseq.R accepts only ASCII spaces, so
+    expressions are normalised before they are checked or written.
+    """
+    return " ".join(str(expression).split())
+
+
+def normalise_contrasts(contrasts: Sequence[Mapping[str, object]]) -> list[dict]:
+    """Return copies of the contrast rows with normalised expressions."""
+    out = []
+    for i, row in enumerate(contrasts):
+        if "expression" not in row:
+            raise ValueError(f"Contrast row {i} needs 'expression': {dict(row)}")
+        out.append({**row, "expression": normalise_expression(str(row["expression"]))})
+    return out
+
+
 def contrast_design_issues(
     contrasts: Sequence[Mapping[str, str]],
     level_names: Mapping[str, str],
@@ -241,12 +261,15 @@ def contrast_design_issues(
 
     Args:
         contrasts: Rows with ``name`` and ``expression``. Expressions must use
-            the R level names (the values of ``level_names``).
+            the R level names (the values of ``level_names``). They are checked
+            after :func:`normalise_expression`, which is also applied before
+            writing, so Python and R see the same text.
         level_names: ``{raw level: R name}`` from :func:`assign_level_names`.
     """
     for i, row in enumerate(contrasts):
         if "name" not in row or "expression" not in row:
             raise ValueError(f"Contrast row {i} needs 'name' and 'expression': {dict(row)}")
+    contrasts = normalise_contrasts(contrasts)
     issues = contrast_name_issues([str(c["name"]) for c in contrasts])
     r_names = list(level_names.values())
     report = check_contrasts(
@@ -283,6 +306,7 @@ def contrast_weights(
     issues = contrast_design_issues(contrasts, level_names)
     if issues:
         raise NamingError("Invalid contrast design:\n- " + "\n- ".join(issues))
+    contrasts = normalise_contrasts(contrasts)
     report = check_contrasts(
         [{"name": str(c["name"]), "expression": str(c["expression"])} for c in contrasts],
         list(level_names.values()),
@@ -307,6 +331,7 @@ def build_naming_record(
         NamingError: if the contrast design is invalid.
     """
     weights = contrast_weights(contrasts, level_names)
+    contrasts = normalise_contrasts(contrasts)
     return {
         "schema_version": NAMING_SCHEMA_VERSION,
         "created_by": {"module": __name__, "date": date.today().isoformat()},

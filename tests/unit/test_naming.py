@@ -26,6 +26,8 @@ from uorca.core.naming import (
     contrast_name_issues,
     contrast_weights,
     legacy_r_naming_hazards,
+    normalise_contrasts,
+    normalise_expression,
 )
 
 pytestmark = pytest.mark.unit
@@ -307,3 +309,20 @@ def test_every_fixture_dataset_gets_valid_unique_level_names(gse):
     mapping = assign_level_names(levels)
     _assert_valid_unique(mapping)
     assert len(mapping) == len(levels)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["KO -\nWT", "KO\t-\tWT", "KO\r\n- WT", "KO\u00a0-\u00a0WT", "  KO   -  WT \n"],
+)
+def test_whitespace_is_normalised_to_single_ascii_spaces(expression):
+    """RNAseq.R accepts only ASCII spaces; Python must check and write that form."""
+    assert normalise_expression(expression) == "KO - WT"
+    mapping = assign_level_names(["KO", "WT"])
+    rows = [{"name": "KO_vs_WT", "expression": expression, "description": "d"}]
+    assert contrast_design_issues(rows, mapping) == []
+    assert normalise_contrasts(rows) == [{"name": "KO_vs_WT", "expression": "KO - WT", "description": "d"}]
+    record = build_naming_record(
+        group_column="g", source_columns=["g"], level_names=mapping, level_counts={}, contrasts=rows
+    )
+    assert record["contrasts"][0]["expression"] == "KO - WT"
