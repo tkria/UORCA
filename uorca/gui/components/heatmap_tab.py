@@ -31,7 +31,8 @@ from .helpers import (
     get_organism_display_name,
     get_valid_contrasts_with_data,
     plotly_fig_to_pdf_bytes,
-    generate_plot_filename
+    generate_plot_filename,
+    render_scrollable_plotly,
 )
 from uorca.gui.results_integration import ResultsIntegrator, ADJUSTED_P_LABEL, ADJUSTED_P_HELP
 
@@ -852,7 +853,8 @@ def _draw_heatmap(
 
             if fig:
                 log_streamlit_event("Heatmap generated successfully")
-                st.plotly_chart(fig, use_container_width=True)
+                # Keep each contrast column readable: scroll instead of squeezing
+                render_scrollable_plotly(fig, key="lfc_heatmap_scroll")
                 # Persist the last generated figure (legacy fallback not used for UI identity)
                 st.session_state['heatmap_last_fig'] = fig
 

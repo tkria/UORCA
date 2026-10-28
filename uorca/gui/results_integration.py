@@ -73,6 +73,7 @@ LABEL_LINE_CHARS = 30  # vertical tick labels: height is cheap, width is not
 LABEL_MAX_LINES = 2   # plus one accession line when several datasets are shown
 ELLIPSIS = "…"
 HOVER_WRAP_CHARS = 80
+HEATMAP_MIN_COL_PX = 48
 FORMULA_MAX_CHARS = 300
 
 
@@ -157,6 +158,61 @@ def build_contrast_labels(contrasts: Sequence[Tuple[Optional[str], str]]) -> Lis
             n += 1
         used.add(candidate)
         labels.append(ContrastLabel(full=full, display=candidate))
+    return labels
+
+
+GROUP_LINE_CHARS = 24
+GROUP_MAX_LINES = 3
+
+
+def _common_label_prefix(names: Sequence[str]) -> str:
+    """Longest prefix shared by all names, cut back to the last '_' or ' '."""
+    if len(names) < 2:
+        return ""
+    prefix = os.path.commonprefix(list(names))
+    cut = max(prefix.rfind("_"), prefix.rfind(" "))
+    prefix = prefix[: cut + 1] if cut >= 0 else ""
+    # Keep at least some text of every name after the prefix
+    if any(len(n) <= len(prefix) for n in names):
+        return ""
+    return prefix
+
+
+def build_group_labels(groups: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, str], str]:
+    """Readable, unique x-axis labels for sample groups.
+
+    Args:
+        groups: ``(accession, group_name)`` pairs. Each pair is one sample group.
+
+    Group names are often long free text that differ only after a shared
+    prefix (for example 22 GSE295568 groups all starting
+    "Placenta_CT27_Human trophoblast stem cells_"). Per dataset, the shared
+    prefix is dropped (shown as a leading ellipsis), the rest is wrapped onto
+    ``GROUP_MAX_LINES`` lines and HTML-escaped. Every distinct pair gets a
+    distinct label, so a cut label can never merge two groups into one box.
+    The full group name stays available for hover text.
+    """
+    pairs = list(dict.fromkeys((str(a), str(g)) for a, g in groups))
+    by_acc: Dict[str, List[str]] = {}
+    for acc, grp in pairs:
+        by_acc.setdefault(acc, []).append(grp)
+    prefixes = {acc: _common_label_prefix(names) for acc, names in by_acc.items()}
+
+    labels: Dict[Tuple[str, str], str] = {}
+    used: Set[str] = set()
+    for acc, grp in pairs:
+        prefix = prefixes[acc]
+        rest = grp[len(prefix):] if prefix else grp
+        display = wrap_contrast_label(rest, line_chars=GROUP_LINE_CHARS, max_lines=GROUP_MAX_LINES)
+        if prefix:
+            display = ELLIPSIS + display
+        candidate = display
+        n = 2
+        while candidate in used:
+            candidate = f"{display} ({n})"
+            n += 1
+        used.add(candidate)
+        labels[(acc, grp)] = candidate
     return labels
 
 
@@ -718,6 +774,12 @@ class ResultsIntegrator:
         full_labels = [lab.full for lab in label_objs]
         logger.info(f"Using {len(contrast_labels)} contrast labels: {', '.join(simplified_labels[:5])}{' ...' if len(simplified_labels) > 5 else ''}")
 
+        # What the hover says for each (gene, column): cells set to 0 are either
+        # not significant or absent from the contrast's DEG table, and "0.00"
+        # would misreport both.
+        NOT_IN_RESULTS = "not in this contrast's results"
+        cell_hover: Dict[Tuple[str, str], str] = {}
+
         # Extract log fold change values for each gene across contrasts
         for gene in genes:
             row = {'Gene': gene}
@@ -729,6 +791,7 @@ class ResultsIntegrator:
                     if 'Gene' not in df.columns:
                         logger.warning(f"No 'Gene' column found in {analysis_id}/{contrast_id}")
                         row[contrast_label] = 0  # Skip this contrast
+                        cell_hover[(gene, contrast_label)] = NOT_IN_RESULTS
                         continue
 
                     # Find log fold change column
@@ -741,6 +804,7 @@ class ResultsIntegrator:
                     if lfc_col is None:
                         logger.warning(f"No log fold change column found in {analysis_id}/{contrast_id}")
                         row[contrast_label] = 0  # Skip this contrast
+                        cell_hover[(gene, contrast_label)] = NOT_IN_RESULTS
                         continue
 
                     # Adjusted p-value (BH) only; raises if the file lacks adj.P.Val
@@ -750,17 +814,25 @@ class ResultsIntegrator:
                     gene_row = df[df['Gene'] == gene]
                     if not gene_row.empty:
                         p_value = gene_row.iloc[0][p_value_col]
-                        abs_lfc = abs(gene_row.iloc[0][lfc_col])
+                        lfc_value = gene_row.iloc[0][lfc_col]
+                        abs_lfc = abs(lfc_value)
                         if p_value >= p_thresh or abs_lfc <= lfc_thresh:
                             row[contrast_label] = 0  # Not significant, set to white
+                            cell_hover[(gene, contrast_label)] = (
+                                f"{lfc_value:.2f} (not significant: {ADJUSTED_P_LABEL} "
+                                f"{p_value:.2g}; shown as 0)"
+                            )
                         else:
-                            row[contrast_label] = gene_row.iloc[0][lfc_col]
+                            row[contrast_label] = lfc_value
+                            cell_hover[(gene, contrast_label)] = f"{lfc_value:.2f}"
                     else:
-                        # Gene not found in this contrast
-                        row[contrast_label] = 0  # Use 0 for non-significant/missing
+                        # Gene not found in this contrast: neutral colour, honest hover
+                        row[contrast_label] = 0
+                        cell_hover[(gene, contrast_label)] = NOT_IN_RESULTS
                 else:
                     logger.debug(f"Contrast {analysis_id}/{contrast_id} not found in DEG data")
                     row[contrast_label] = 0  # Skip this contrast
+                    cell_hover[(gene, contrast_label)] = NOT_IN_RESULTS
 
             # Only add the row if there's at least one logFC value
             if len(row) > 1:  # More than just the Gene column
@@ -965,7 +1037,10 @@ class ResultsIntegrator:
             ),
             aspect="auto",  # Maintain aspect ratio based on data
             height=height_px,
-            width=max(700, min(1700, len(heatmap_df.columns) * 90)),  # Dynamic width based on number of contrasts
+            # Minimum readable width: each contrast column needs room for up to
+            # three vertical label lines. The tab shows the chart in a scrolling
+            # container, so a narrow page scrolls instead of squeezing columns.
+            width=max(700, left_margin + len(heatmap_df.columns) * HEATMAP_MIN_COL_PX + 160),
             zmin=-max_abs_value,  # Symmetrical color scale
             zmax=max_abs_value,
             color_continuous_midpoint=0  # Ensure white is at 0
@@ -996,8 +1071,8 @@ class ResultsIntegrator:
         # Create a 3D array with gene logFC, contrast description, contrast formula, accession info, and original contrast name
         # First dimension: rows (genes)
         # Second dimension: columns (contrasts)
-        # Third dimension: data types (0: contrast description, 1: accession, 2: original contrast name, 3: contrast formula)
-        hover_info = np.empty((*heatmap_df.shape, 4), dtype=object)
+        # Third dimension: data types (0: contrast description, 1: accession, 2: original contrast name, 3: contrast formula, 4: Log2FC hover text)
+        hover_info = np.empty((*heatmap_df.shape, 5), dtype=object)
 
         # Keep track of original contrast names for both hover and axis labels
         original_contrast_names = []
@@ -1034,12 +1109,15 @@ class ResultsIntegrator:
                 hover_info[i, j, 1] = html.escape(str(accession), quote=False)
                 hover_info[i, j, 2] = html.escape(full_name, quote=False)
                 hover_info[i, j, 3] = wrap_hover_text(expression, max_chars=FORMULA_MAX_CHARS)
+                hover_info[i, j, 4] = html.escape(
+                    cell_hover.get((gene, clustered_col), NOT_IN_RESULTS), quote=False
+                )
 
         # Update hover template with conditional formatting, accession, and description
         hover_template = (
             "<b>Gene:</b> %{y}<br>" +
             "<b>Contrast:</b> %{customdata[2]}<br>" +  # Full contrast name
-            "<b>Log2FC:</b> %{z:.2f}<br>" +
+            "<b>Log2FC:</b> %{customdata[4]}<br>" +
             "<b>Accession:</b> %{customdata[1]}<br>" +
             "<b>Description:</b> %{customdata[0]}<br>" +
             "<b>Formula:</b> %{customdata[3]}<br>" +
@@ -1342,18 +1420,6 @@ class ResultsIntegrator:
             plot_df['LogExpression'] = np.log2(plot_df['Expression'] + 1)
             y_axis_title = "Log<sub>2</sub>(CPM+1)"
 
-        # Adaptive facet spacing to reduce label overlap when few rows
-        if n_rows <= 1:
-            facet_row_spacing = 0.06
-        elif n_rows == 2:
-            facet_row_spacing = 0.05
-        elif n_rows <= 4:
-            facet_row_spacing = 0.04
-        else:
-            max_allowed_row_spacing = (1.0 / (n_rows - 1)) - 1e-6
-            facet_row_spacing = min(0.03, max_allowed_row_spacing)
-            if facet_row_spacing < 0:
-                facet_row_spacing = 0.0
         facet_col_spacing = 0.03
 
         # Build combined x-axis labels in the format: "GSEXXXX - group <group>"
@@ -1367,14 +1433,36 @@ class ResultsIntegrator:
                 if isinstance(r.get('Analysis', None), str) else r.get('Analysis', ''), axis=1
             )
 
-        # Construct the x-axis label using only the group name (no accession)
-        full_label_series = plot_df['Group'].astype(str)
+        # x-axis label per (dataset, group). The label is also the box key, so
+        # it must be unique: a cut label shared by two groups would pool their
+        # samples into one box. build_group_labels drops the prefix shared by a
+        # dataset's groups, wraps the rest and numbers any remaining clash.
+        group_pairs = list(zip(plot_df['Accession'].astype(str), plot_df['Group'].astype(str)))
+        group_labels = build_group_labels(group_pairs)
+        plot_df['XLabel'] = [group_labels[pair] for pair in group_pairs]
+        x_order = list(dict.fromkeys(plot_df['XLabel']))
+        self.last_expression_group_labels = dict(group_labels)
 
-        # Truncate labels longer than 20 characters and append '...'
-        MAX_LABEL_CHARS = 20
-        plot_df['XLabel'] = full_label_series.apply(
-            lambda s: s if len(str(s)) <= MAX_LABEL_CHARS else str(s)[:MAX_LABEL_CHARS] + '...'
+        # Vertical tick labels: reserve their height between facet rows so the
+        # next row's gene title and the labels do not overlap.
+        tick_font_px = 10
+        longest_line = max(
+            (len(html.unescape(line)) for lab in x_order for line in lab.split("<br>")),
+            default=10,
         )
+        label_px = int(longest_line * tick_font_px * 0.62) + 10
+        if n_rows <= 2:
+            plot_px_per_row = 420
+        elif n_rows <= 6:
+            plot_px_per_row = 380
+        else:
+            plot_px_per_row = 340
+        height_per_row = plot_px_per_row + label_px + 60
+        total_height = height_per_row * max(1, n_rows)
+        if n_rows > 1:
+            facet_row_spacing = min((label_px + 60) / total_height, 0.95 / (n_rows - 1))
+        else:
+            facet_row_spacing = 0.0
 
         # Build an explicit color map for datasets to ensure colors are embedded (important for static export)
         try:
@@ -1404,24 +1492,17 @@ class ResultsIntegrator:
             labels={'LogExpression': y_axis_title, 'DatasetDisplay': 'Dataset'},
             facet_row_spacing=facet_row_spacing,
             facet_col_spacing=facet_col_spacing,
-            color_discrete_map=color_discrete_map
+            color_discrete_map=color_discrete_map,
+            category_orders={'XLabel': x_order},
         )
 
-        # Layout adjustments optimized for readability (adaptive per-row height)
-        if n_rows <= 2:
-            height_per_row = 560
-        elif n_rows <= 4:
-            height_per_row = 520
-        elif n_rows <= 6:
-            height_per_row = 480
-        elif n_rows <= 10:
-            height_per_row = 460
-        else:
-            height_per_row = 440
-
+        # Each facet needs ~44 px per group for vertical multi-line labels; the
+        # tab shows the chart in a horizontally scrolling container when the
+        # page is narrower than this width.
+        facet_px = max(500, 44 * len(x_order) + 80)
         fig.update_layout(
-            height=height_per_row * max(1, n_rows),
-            width=600 * facet_col_wrap,  # 600px per column (wider for better boxplot visibility)
+            height=total_height,
+            width=facet_px * facet_col_wrap,
             legend_title_text="Dataset",
             margin=dict(l=40, r=20, t=80, b=6),
             font_family="Inter, sans-serif",
@@ -1443,9 +1524,9 @@ class ResultsIntegrator:
             fig.update_xaxes(visible=False)
         else:
             # Show axis tick labels on all facets with minimal standoff, align close to plot, and no axis title
-            fig.update_xaxes(visible=True, showticklabels=True, tickangle=45,
+            fig.update_xaxes(visible=True, showticklabels=True, tickangle=-90,
                              ticklabelstandoff=0, automargin=True, title_text="",
-                             tickfont=dict(size=10))
+                             tickfont=dict(size=tick_font_px))
 
         # Add light dotted vertical gridlines to separate groups across the full plotting area
         if show_grid_lines:

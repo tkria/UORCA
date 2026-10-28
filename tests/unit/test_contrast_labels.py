@@ -265,3 +265,34 @@ def test_heatmap_hover_and_axes(two_dataset_results):
     label_map = dict(zip(ctx["contrast_labels"], ctx["simplified_labels"]))
     assert [label_map[c] for c in ctx["clustered_contrasts"]] == ticktext
     assert set(ctx["full_labels"]) == set(by_full)
+
+
+@pytest.mark.unit
+def test_hover_says_when_a_gene_is_not_in_a_contrast(two_dataset_results):
+    ri = two_dataset_results
+    contrasts = [("GSE1", "shared_vs_control"), ("GSE2", "shared_vs_control")]
+    fig = ri.create_lfc_heatmap(genes=["G1", "G3", "ABSENT"], contrasts=contrasts,
+                                hide_empty_rows_cols=False, cluster_genes=False)
+    assert fig is not None
+    assert "%{customdata[4]}" in fig.data[0].hovertemplate
+    assert "%{z:.2f}" not in fig.data[0].hovertemplate
+    genes = list(fig.data[0].y)
+    custom = fig.data[0].customdata
+    absent_row = custom[genes.index("ABSENT")]
+    assert all(cell[4] == "not in this contrast's results" for cell in absent_row)
+    assert list(fig.data[0].z[genes.index("ABSENT")]) == [0, 0]  # neutral colour
+    g1 = custom[genes.index("G1")]
+    assert all(cell[4] in {"2.00", "3.00"} for cell in g1)
+    # G3 has adj.P.Val 0.01 < 0.05 and |logFC| ~3: significant
+    g3 = custom[genes.index("G3")]
+    assert all(not cell[4].startswith("not in") for cell in g3)
+
+
+@pytest.mark.unit
+def test_hover_marks_non_significant_values(two_dataset_results):
+    ri = two_dataset_results
+    fig = ri.create_lfc_heatmap(genes=["G1", "G3"], contrasts=[("GSE1", "shared_vs_control")],
+                                p_value_threshold=0.005, hide_empty_rows_cols=False, cluster_genes=False)
+    genes = list(fig.data[0].y)
+    g3 = fig.data[0].customdata[genes.index("G3")][0][4]
+    assert "not significant" in g3 and "shown as 0" in g3

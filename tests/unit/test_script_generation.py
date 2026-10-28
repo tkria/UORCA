@@ -218,3 +218,39 @@ def test_repro_script_renders_wrapped_labels(tmp_path, monkeypatch):
     assert fig.layout.xaxis.automargin is True
     assert fig.layout.yaxis.automargin is True
     assert fig.layout.margin.b > 120
+
+
+@pytest.mark.unit
+def test_repro_script_reads_its_own_folder_and_adds_subtitle(tmp_path, monkeypatch):
+    """Run from another directory: metadata.json and the data next to the script are used."""
+    import json
+    import runpy
+    import sys
+
+    import pandas as pd
+    import plotly.graph_objects as go
+
+    pkg = tmp_path / "package"
+    pkg.mkdir()
+    pd.DataFrame({"Gene": ["A", "B"], "c1": [1.5, 0.0], "c2": [0.0, -2.0]}).to_csv(pkg / "heatmap_data.csv", index=False)
+    (pkg / "metadata.json").write_text(json.dumps({
+        "output_format": "png", "p_value_threshold": 0.01, "lfc_threshold": 1.5,
+        "x_axis_labels": {"c1": "first", "c2": "second"}, "clustered_contrasts": ["c1", "c2"],
+    }))
+    script = pkg / "reproduce_heatmap.py"
+    script.write_text(build_repro_script())
+
+    captured = {}
+    monkeypatch.setattr(go.Figure, "write_image",
+                        lambda self, path, *a, **k: captured.update(fig=self, path=path))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(sys, "argv", ["reproduce_heatmap.py"])
+    runpy.run_path(str(script), run_name="__main__")
+
+    fig = captured["fig"]
+    assert list(fig.layout.xaxis.ticktext) == ["first", "second"]  # labels from metadata.json
+    assert "Adjusted p-value (BH) < 0.01" in fig.layout.title.text
+    assert "|Log2FC| > 1.5" in fig.layout.title.text
+    assert captured["path"] == str(pkg / "heatmap.png")

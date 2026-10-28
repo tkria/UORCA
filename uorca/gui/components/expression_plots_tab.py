@@ -5,6 +5,7 @@ This tab displays violin plots showing gene expression distributions across samp
 Simplified interface with combined form for group and gene selection.
 """
 
+import os
 import re
 import logging
 import streamlit as st
@@ -24,7 +25,8 @@ from .helpers import (
     filter_genes_by_organism_datasets,
     get_organism_display_name,
     plotly_fig_to_pdf_bytes,
-    generate_plot_filename
+    generate_plot_filename,
+    render_scrollable_plotly,
 )
 from uorca.gui.results_integration import ResultsIntegrator
 from uorca.gui.ortholog_mapper import (
@@ -191,48 +193,32 @@ def _get_group_dataset_combinations(ri: ResultsIntegrator, selected_datasets: Li
 
 
 def _get_sample_count_for_group(ri: ResultsIntegrator, dataset_id: str, group_name: str) -> int:
-    """Get the number of samples in a specific group for a dataset.
+    """Number of samples in one group of a dataset, from edger_analysis_samples.csv.
 
-    Verbose logging is handled at the dataset level in _get_group_dataset_combinations
-    to avoid logging per group.
+    Returns 0 only when the dataset has no sample file or no group column
+    (logged). Read errors propagate: a broad ``except`` here once turned a
+    missing ``import os`` into a silent count of 0 for every group.
     """
-    try:
-        # Look for the sample mapping file
-        analysis_dir = os.path.join(ri.results_dir, dataset_id)
-        sample_file_locations = [
-            os.path.join(analysis_dir, "metadata", "edger_analysis_samples.csv"),
-            os.path.join(analysis_dir, "edger_analysis_samples.csv"),
-        ]
-
-        edger_samples_file = None
-        for path in sample_file_locations:
-            if os.path.isfile(path):
-                edger_samples_file = path
-                break
-
-        if not edger_samples_file:
-            return 0
-
-        # Load the sample mapping file
-        sample_mapping_df = pd.read_csv(edger_samples_file, nrows=0)
-        first_col = sample_mapping_df.columns[0]
-        has_index = first_col == '' or first_col.startswith('Unnamed')
-        sample_mapping_df = pd.read_csv(edger_samples_file, index_col=0 if has_index else None)
-
-        # Get the group column from analysis_info
-        group_col = None
-        if ri.analysis_info and dataset_id in ri.analysis_info and 'merged_column' in ri.analysis_info[dataset_id]:
-            group_col = ri.analysis_info[dataset_id]['merged_column']
-
-        if group_col and group_col in sample_mapping_df.columns:
-            # Count samples in this group
-            count = (sample_mapping_df[group_col] == group_name).sum()
-            return int(count)
-
+    analysis_dir = os.path.join(ri.results_dir, dataset_id)
+    sample_file_locations = [
+        os.path.join(analysis_dir, "metadata", "edger_analysis_samples.csv"),
+        os.path.join(analysis_dir, "edger_analysis_samples.csv"),
+    ]
+    edger_samples_file = next((p for p in sample_file_locations if os.path.isfile(p)), None)
+    if not edger_samples_file:
+        logger.warning(f"No edger_analysis_samples.csv for {dataset_id}; sample counts shown as 0")
         return 0
-    except Exception as e:
-        logger.warning(f"Error getting sample count for group {group_name} in {dataset_id}: {e}")
+
+    header = pd.read_csv(edger_samples_file, nrows=0)
+    first_col = header.columns[0]
+    has_index = first_col == '' or first_col.startswith('Unnamed')
+    sample_mapping_df = pd.read_csv(edger_samples_file, index_col=0 if has_index else None)
+
+    group_col = ri.analysis_info.get(dataset_id, {}).get('merged_column')
+    if not group_col or group_col not in sample_mapping_df.columns:
+        logger.warning(f"Group column {group_col!r} not in {edger_samples_file}; sample counts shown as 0")
         return 0
+    return int((sample_mapping_df[group_col] == group_name).sum())
 
 
 @log_streamlit_function
@@ -511,9 +497,13 @@ def _draw_expression_plots(
             # selected_groups contains items like "GroupName_DatasetAccession"
             actual_groups = []
             for group_id in selected_groups:
-                # Extract just the group name part (before the underscore)
+                # Extract just the group name part (before the last underscore)
                 if '_' in group_id:
-                    group_name = group_id.rsplit('_', 1)[0]
+                    group_name, accession = group_id.rsplit('_', 1)
+                    # The table renames a name shared by datasets to "name (ACC)"
+                    suffix = f" ({accession})"
+                    if group_name.endswith(suffix):
+                        group_name = group_name[: -len(suffix)]
                     actual_groups.append(group_name)
                 else:
                     actual_groups.append(group_id)
@@ -562,7 +552,8 @@ def _draw_expression_plots(
                 )
 
                 # Display the plot
-                st.plotly_chart(fig2, use_container_width=True)
+                # Keep each group readable: scroll instead of squeezing the boxes
+                render_scrollable_plotly(fig2, key="expression_plots_scroll")
 
                 # Two-step PDF export to avoid heavy processing until requested
                 import hashlib

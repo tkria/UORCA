@@ -111,10 +111,11 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
         st.info("No valid datasets available. Ensure analyses completed successfully.")
         return
 
-    selected_dataset_display = st.selectbox(
+    selected_dataset_display = _persistent_selectbox(
         "Select a dataset to view analysis plots:",
         dataset_options,
-        key="analysis_dataset_select"
+        widget_key="analysis_dataset_select",
+        state_key="analysis_dataset_choice",
     )
     selected_dataset = dataset_mapping.get(selected_dataset_display, selected_dataset_display) if selected_dataset_display else None
 
@@ -470,6 +471,28 @@ def _render_de_plots(ri: ResultsIntegrator, selected_dataset: str, base_path: st
         _render_deg_table(selected_dataset, selected_contrast, contrast_path)
 
 
+def _persistent_selectbox(label: str, options: List[str], widget_key: str, state_key: str) -> Optional[str]:
+    """A selectbox whose choice survives a full-app rerun started inside the fragment.
+
+    ``st.rerun()`` from inside an ``st.fragment`` (for example after "Prepare
+    Download Package") resets the fragment's widget state, so a plain selectbox
+    went back to its first option while the page still showed the user's choice.
+    The choice is kept in ``state_key`` (not a widget key) and passed back as
+    ``index``, so the value used for the plots always matches the selectbox.
+    """
+    if not options:
+        return None
+    stored = st.session_state.get(state_key)
+    index = options.index(stored) if stored in options else 0
+
+    def _remember() -> None:
+        st.session_state[state_key] = st.session_state[widget_key]
+
+    choice = st.selectbox(label, options, index=index, key=widget_key, on_change=_remember)
+    st.session_state[state_key] = choice
+    return choice
+
+
 @log_streamlit_function
 def _render_contrast_selection(ri: ResultsIntegrator, contrast_dirs: List[str],
                                analysis_id: str) -> Optional[str]:
@@ -496,8 +519,14 @@ def _render_contrast_selection(ri: ResultsIntegrator, contrast_dirs: List[str],
     # Create mapping from display string to actual contrast ID
     contrast_display_to_id = {opt: contrast_dirs[i] for i, opt in enumerate(contrast_options)}
 
-    selected_contrast_display = st.selectbox("Select a contrast:", contrast_options, key="analysis_contrast_select")
-    return contrast_display_to_id.get(selected_contrast_display)
+    # Per-dataset keys: each dataset remembers its own contrast
+    selected_contrast_display = _persistent_selectbox(
+        "Select a contrast:",
+        contrast_options,
+        widget_key=f"analysis_contrast_select_{analysis_id}",
+        state_key=f"analysis_contrast_choice_{analysis_id}",
+    )
+    return contrast_display_to_id.get(selected_contrast_display) if selected_contrast_display else None
 
 
 @log_streamlit_function
