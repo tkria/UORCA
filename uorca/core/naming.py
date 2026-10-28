@@ -56,7 +56,9 @@ SAFE_LEVEL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9._]*$")
 """An R level name that is ASCII, starts with a letter and so reads the same
 in every locale (F18)."""
 
-SLUG_MAX_LENGTH = 32
+SLUG_MAX_LENGTH = 64
+"""Slug length after the prefix shared by all levels is removed. 64 keeps the
+distinguishing words of long GEO labels (GSE295568: '..._starting_on_day_0')."""
 
 
 MissingGroupPolicy = Literal["flag", "stop"]
@@ -77,14 +79,35 @@ class NamingError(ValueError):
 
 
 def _slug(raw: str) -> str:
-    """Return a short ASCII slug that keeps the sign of ``+``/``-`` markers."""
+    """Return the full ASCII slug of a level, keeping the sign of ``+``/``-``."""
     # unidecode maps Greek mu to "m", which would read as milli; both mu code
     # points (U+00B5 micro sign, U+03BC Greek mu) mean micro in GEO metadata.
     s = unidecode(raw.replace("\u00b5", "u").replace("\u03bc", "u"))
     s = s.replace("+", "pos")
     s = re.sub(r"-(?=$|[^A-Za-z0-9])", "neg", s)
-    s = re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
-    return s[:SLUG_MAX_LENGTH].rstrip("_")
+    return re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
+
+
+def _distinguishing_slugs(raws: Sequence[str]) -> dict[str, str]:
+    """Slug of each level without the leading words shared by all levels, cut
+    to ``SLUG_MAX_LENGTH``.
+
+    GEO labels often share a long prefix (GSE295568: 'Placenta_CT27_Human_
+    trophoblast_stem_cells_...'); cutting before removing it would leave every
+    slug the same. Words are compared whole, so the result is deterministic.
+    """
+    words = {raw: _slug(raw).split("_") if _slug(raw) else [] for raw in raws}
+    shared = 0
+    if len(raws) > 1:
+        lists = list(words.values())
+        shortest = min(len(w) for w in lists)
+        while shared < shortest and len({tuple(w[: shared + 1]) for w in lists}) == 1:
+            shared += 1
+    out = {}
+    for raw, w in words.items():
+        rest = w[shared:] or w  # a level that is only the shared prefix keeps it
+        out[raw] = "_".join(rest)[:SLUG_MAX_LENGTH].rstrip("_")
+    return out
 
 
 def _is_safe_level_name(name: str) -> bool:
@@ -143,8 +166,9 @@ def assign_level_names(raw_levels: Iterable[object]) -> dict[str, str]:
             )
             needs_id.append((idx, raw, reason))
 
+    slugs = _distinguishing_slugs(raws)
     for idx, raw, reason in needs_id:
-        slug = _slug(raw)
+        slug = slugs[raw]
         name = f"g{idx:0{width}d}" + (f"_{slug}" if slug else "")
         while name in used:
             name += "_x"

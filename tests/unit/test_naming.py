@@ -65,8 +65,9 @@ def test_gse161060_levels_get_distinct_valid_names():
     mapping = assign_level_names(levels)
 
     _assert_valid_unique(mapping)
-    assert mapping["CD45+F4/80+CD11b+EGFP-"] == "g01_CD45posF4_80posCD11bposEGFPneg"
-    assert mapping["CD45+F4/80+CD11b+EGFP+"] == "g02_CD45posF4_80posCD11bposEGFPpos"
+    # The shared first word 'CD45posF4' is removed from both slugs.
+    assert mapping["CD45+F4/80+CD11b+EGFP-"] == "g01_80posCD11bposEGFPneg"
+    assert mapping["CD45+F4/80+CD11b+EGFP+"] == "g02_80posCD11bposEGFPpos"
     hazards = legacy_r_naming_hazards(levels)
     assert any("merge" in h for h in hazards)
 
@@ -196,7 +197,7 @@ def test_long_colliding_levels_get_bounded_slugs():
     base = "very long cell population name " * 7
     mapping = assign_level_names([base + "+", base + "-"])
     _assert_valid_unique(mapping)
-    assert all(len(n) <= 3 + 1 + 32 for n in mapping.values())
+    assert all(len(n) <= 3 + 1 + 64 for n in mapping.values())
 
 
 def test_assigned_name_never_clashes_with_a_kept_name():
@@ -348,3 +349,19 @@ def test_missing_group_values_flag_or_stop():
     with pytest.raises(NamingError, match="2 of 4 samples"):
         missing_group_signals(rows, ["genotype", "donor"], policy="stop")
     assert missing_group_signals([("WT",), ("KO",)], ["genotype"]) == []
+
+
+def test_gse295568_slugs_keep_the_distinguishing_part():
+    """All 22 labels start 'Placenta_CT27_Human trophoblast stem cells_'; the
+    slugs must differ after that prefix, not all read '..._Human_trophoblast'."""
+    levels = _samples("GSE295568")["uorca_group"].unique().tolist()
+    mapping = assign_level_names(levels)
+    _assert_valid_unique(mapping)
+    assigned = {raw: n for raw, n in mapping.items() if n != r_make_names(raw)}
+    assert len(assigned) >= 10
+    slugs = [n.split("_", 1)[1] for n in assigned.values()]
+    assert len(set(slugs)) == len(slugs), slugs
+    assert not any(s.startswith("Placenta") for s in slugs)
+    day0 = next(n for raw, n in assigned.items() if "starting on day 0" in raw)
+    assert day0.endswith("starting_on_day_0_of_EVT_d"), day0
+    assert assign_level_names(levels) == mapping  # deterministic
