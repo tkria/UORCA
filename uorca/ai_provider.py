@@ -55,6 +55,7 @@ the environment variable when it does not.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -554,6 +555,87 @@ class ContainerEnv:
     needs_aws_config: bool = False
 
 
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _url_for_display(url: str) -> str:
+    """*url* with credentials, query string and fragment removed (safe to print)."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    host = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _check_container_url(url: str, what: str) -> None:
+    """Refuse a URL that would carry a secret into a container setting.
+
+    The URL is passed to the container by value, so it must hold no credentials:
+    no ``user:password@``, no query string (``?api-key=...``) and no fragment.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if "@" in parts.netloc or parts.query or parts.fragment:
+        raise ProviderConfigError(
+            f"The {what} {_url_for_display(url)} has credentials, a query string or a "
+            "fragment. Pipeline containers receive it as a plain setting, so it must "
+            "hold no secret: remove them, and put the key in the key variable instead."
+        )
+
+
+def _container_unsupported(spec: ModelSpec) -> str | None:
+    """Why *spec* works on this machine but cannot work inside a pipeline container."""
+    from urllib.parse import urlsplit
+
+    if spec.provider == "google-vertex":
+        return (
+            "Vertex AI is not supported for `uorca run` yet: its credentials (the "
+            "GOOGLE_APPLICATION_CREDENTIALS file or the gcloud application-default "
+            "login) are not mounted into the pipeline containers. Use it for "
+            "`uorca identify`, or choose another provider for pipeline runs."
+        )
+    if spec.provider == "openai_compatible":
+        host = (urlsplit(spec.base_url or "").hostname or "").lower()
+        if host in _LOCAL_HOSTS:
+            return (
+                f"The OpenAI-compatible server is at {_url_for_display(spec.base_url or '')}, "
+                f"but '{host}' inside a pipeline container is the container itself, not "
+                "this machine. For `uorca run local` (Docker Desktop) use "
+                "http://host.docker.internal:<port>/v1; for `uorca run slurm` use a host "
+                "name the compute nodes can reach."
+            )
+    if spec.provider == "bedrock":
+        defaults = {"AWS_CONFIG_FILE": "config", "AWS_SHARED_CREDENTIALS_FILE": "credentials"}
+        for name, default in defaults.items():
+            value = os.environ.get(name)
+            if value and Path(value).expanduser() != Path.home() / ".aws" / default:
+                return (
+                    f"{name} is set, but pipeline containers only see the default ~/.aws "
+                    f"directory. Unset {name} and keep the AWS profile in ~/.aws, or "
+                    "choose another provider for pipeline runs."
+                )
+        import boto3
+
+        from botocore.exceptions import BotoCoreError
+
+        try:
+            session = boto3.Session(profile_name=spec.profile, region_name=spec.region)
+            scoped = session._session.get_scoped_config()  # noqa: SLF001
+        except BotoCoreError:
+            # e.g. ProfileNotFound: check_provider_credentials reports it by name.
+            scoped = {}
+        if "credential_process" in scoped:
+            return (
+                "The AWS profile uses credential_process, which runs a helper program "
+                "that is not in the pipeline containers. Use an AWS SSO profile ('aws "
+                "sso login') or access keys for pipeline runs."
+            )
+    return None
+
+
 def container_env(spec: ModelSpec | None = None) -> ContainerEnv:
     """Describe the environment a pipeline container needs for *spec*.
 
@@ -561,12 +643,16 @@ def container_env(spec: ModelSpec | None = None) -> ContainerEnv:
         spec: The resolved spec; defaults to :func:`resolve_model_spec`.
 
     Raises:
-        ProviderConfigError: The OpenAI-compatible base URL holds ``user:password@``.
-            It would be passed as a plain setting, so the credentials must move to the
-            key variable instead.
+        ProviderConfigError: The setting cannot be carried into a container safely or
+            would not work there: a base URL or endpoint holding credentials, a query
+            string or a fragment; a key variable name that is not a plain identifier;
+            Vertex AI; a localhost server; or an AWS setup the container cannot see.
     """
     if spec is None:
         spec = resolve_model_spec()
+    reason = _container_unsupported(spec)
+    if reason:
+        raise ProviderConfigError(reason)
     provider = spec.provider
     settings: dict[str, str] = {}
     secrets: tuple[str, ...] = ()
@@ -582,6 +668,7 @@ def container_env(spec: ModelSpec | None = None) -> ContainerEnv:
             settings[UORCA_BEDROCK_PROFILE] = spec.profile
         secrets = AWS_ENV_VARS
     elif provider == "azure":
+        _check_container_url(spec.endpoint or "", "Azure OpenAI endpoint")
         settings.update({
             UORCA_AI_PROVIDER: "azure",
             UORCA_AZURE_DEPLOYMENT: spec.model,
@@ -590,29 +677,20 @@ def container_env(spec: ModelSpec | None = None) -> ContainerEnv:
         })
         secrets = (AZURE_OPENAI_API_KEY,)
     elif provider == "openai_compatible":
-        base_url = spec.base_url or ""
-        if redact_url(base_url) != base_url:
-            raise ProviderConfigError(
-                f"The OpenAI-compatible base URL {redact_url(base_url)} contains "
-                "credentials. Pipeline containers receive the base URL as a plain "
-                "setting, so put the key in the variable named by "
-                f"{UORCA_OPENAI_COMPATIBLE_API_KEY_ENV} instead."
-            )
+        _check_container_url(spec.base_url or "", "OpenAI-compatible base URL")
         settings.update({
             UORCA_AI_PROVIDER: "openai_compatible",
-            UORCA_OPENAI_COMPATIBLE_BASE_URL: base_url,
+            UORCA_OPENAI_COMPATIBLE_BASE_URL: spec.base_url or "",
             UORCA_OPENAI_COMPATIBLE_MODEL: spec.model,
         })
         if spec.api_key_env:
+            if not ENV_NAME_RE.match(spec.api_key_env):
+                raise ProviderConfigError(
+                    f"{UORCA_OPENAI_COMPATIBLE_API_KEY_ENV} must name an environment "
+                    "variable (letters, digits and '_', not starting with a digit)."
+                )
             settings[UORCA_OPENAI_COMPATIBLE_API_KEY_ENV] = spec.api_key_env
             secrets = (spec.api_key_env,)
-    elif provider == "google-vertex":
-        settings[UORCA_AI_PROVIDER] = spec.display_name
-        if spec.project:
-            settings[GOOGLE_CLOUD_PROJECT] = spec.project
-        if spec.location:
-            settings[GOOGLE_CLOUD_LOCATION] = spec.location
-        secrets = ("GOOGLE_APPLICATION_CREDENTIALS",)
     else:  # pragma: no cover - resolve_model_spec only returns supported providers
         raise ProviderConfigError(f"No container settings for provider {provider!r}.")
 

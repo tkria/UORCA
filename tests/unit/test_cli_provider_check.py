@@ -17,6 +17,8 @@ _ENV = (
     "UORCA_AI_PROVIDER", "UORCA_OPENAI_MODEL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
     "GOOGLE_API_KEY", "GEMINI_API_KEY", "AWS_PROFILE", "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "UORCA_BEDROCK_PROFILE",
+    "UORCA_OPENAI_COMPATIBLE_BASE_URL", "UORCA_OPENAI_COMPATIBLE_MODEL",
+    "UORCA_OPENAI_COMPATIBLE_API_KEY_ENV", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
 )
 
 
@@ -27,8 +29,8 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("ENTREZ_EMAIL", "test@example.org")
     monkeypatch.setenv("ENTREZ_API_KEY", "fake")
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "aws_config"))
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "aws_credentials"))
+    # HOME is the temporary directory, so ~/.aws is empty; AWS_CONFIG_FILE stays unset
+    # (a non-default path is refused for `uorca run`).
     monkeypatch.setattr(ai_provider, "CONFIG_PATH", tmp_path / "config.yaml")
     ai_provider._load_ai_config.cache_clear()
     yield
@@ -144,3 +146,13 @@ def test_no_ai_step_needs_no_ai_key(capsys):
     assert "OPENAI_API_KEY not set - AI-powered analysis features will be disabled" in (
         capsys.readouterr().out
     )
+
+
+def test_run_stops_on_the_host_for_a_localhost_server(monkeypatch, capsys):
+    """Passes on this machine, would fail in every container: stop before submitting."""
+    monkeypatch.setenv("UORCA_AI_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("UORCA_OPENAI_COMPATIBLE_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("UORCA_OPENAI_COMPATIBLE_MODEL", "qwen3:8b")
+    out = _exits(capsys, require_ai="run")
+    assert "host.docker.internal" in out
+    cli._check_environment_requirements(require_ai="identify")  # fine for identify

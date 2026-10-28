@@ -6,8 +6,11 @@ scripts (single dataset with Apptainer and with Docker, and user data). Each tes
 
 * rebuilds the environment the container would see: the settings passed by value, plus
   each variable passed by name with the value the runtime would copy from the host;
-* resolves the model spec in that environment with **no** config file, as in a fresh
-  container, and requires it to equal the host's spec;
+* resolves the model spec in that environment and requires it to equal the host's spec.
+  Docker does not mount the home directory, so it resolves with **no** config file.
+  Apptainer mounts ``$HOME`` by default, so ``~/.uorca/config.yaml`` is visible there,
+  and it resolves with the host's config file present (the job runs under ``bash -lc``;
+  the user's login files are not modelled);
 * scans the argv, the scripts and every file the job wrote for each fake key value, and
   fails if one appears.
 
@@ -39,7 +42,8 @@ _ALL_VARS = (
     "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "OPENAI_API_VERSION",
     "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GOOGLE_APPLICATION_CREDENTIALS",
     "AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-    "AWS_REGION", "AWS_DEFAULT_REGION", "LOCAL_LLM_KEY", "ENTREZ_EMAIL", "ENTREZ_API_KEY",
+    "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+    "LOCAL_LLM_KEY", "ENTREZ_EMAIL", "ENTREZ_API_KEY",
 )
 
 ENTREZ = {"ENTREZ_EMAIL": "contract@example.org", "ENTREZ_API_KEY": "SECRET-ENTREZ-0001"}
@@ -85,9 +89,6 @@ CASES = [
          secrets={"LOCAL_LLM_KEY": "SECRET-LOCAL-0001",
                   # Set but not selected: must not be passed at all.
                   "OPENAI_API_KEY": "SECRET-OPENAI-UNUSED-0001"}),
-    Case("google-vertex",
-         config={"provider": "google-vertex", "google-vertex": {
-             "model": "gemini-2.5-pro", "project": "uorca-proj", "location": "europe-west4"}}),
 ]
 
 
@@ -116,8 +117,13 @@ def host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 def _resolve_in_container(monkeypatch, tmp_path, settings: dict[str, str],
-                          names: list[str], host_env: dict[str, str]) -> ai_provider.ModelSpec:
-    """Resolve the spec with only what the container receives, and no config file."""
+                          names: list[str], host_env: dict[str, str],
+                          config_path: Path | None = None) -> ai_provider.ModelSpec:
+    """Resolve the spec with only what the container receives.
+
+    *config_path* is the config file the container can see (Apptainer mounts $HOME);
+    ``None`` means none (Docker).
+    """
     for name in _ALL_VARS:
         monkeypatch.delenv(name, raising=False)
     for key, value in settings.items():
@@ -125,7 +131,9 @@ def _resolve_in_container(monkeypatch, tmp_path, settings: dict[str, str],
     for name in names:  # the runtime copies by-name variables from the host
         if name in host_env:
             monkeypatch.setenv(name, host_env[name])
-    monkeypatch.setattr(ai_provider, "CONFIG_PATH", tmp_path / "container-has-no-config.yaml")
+    monkeypatch.setattr(
+        ai_provider, "CONFIG_PATH", config_path or tmp_path / "container-has-no-config.yaml"
+    )
     ai_provider._load_ai_config.cache_clear()
     return ai_provider.resolve_model_spec()
 
@@ -284,9 +292,15 @@ def test_sbatch_container_resolves_host_model(case, kind, host, monkeypatch, tmp
         settings, names = _parse_docker_array(script)
         assert '"${DOCKER_AI_ARGS[@]}"' in script
         aws_line = 'DOCKER_AI_ARGS+=(-v "$HOME/.aws:/root/.aws:ro")'
+        env_mask = ':/workspace/src/.env:ro")'
+        visible_config = None
     else:
         settings, names = _parse_apptainer_env(script)
-        aws_line = 'BIND="$BIND -B $HOME/.aws:$HOME/.aws:ro"'
+        aws_line = '"$HOME/.aws:$HOME/.aws:ro"'
+        env_mask = "/.env:ro\""
+        assert "bash -lc" in script
+        visible_config = ai_provider.CONFIG_PATH  # Apptainer mounts $HOME
+    assert env_mask in script, "the repository .env must be masked"
     assert (aws_line in script) == (host_spec.provider == "bedrock")
     for name in case.secrets:
         if name == "OPENAI_API_KEY" and host_spec.provider != "openai":
@@ -294,7 +308,9 @@ def test_sbatch_container_resolves_host_model(case, kind, host, monkeypatch, tmp
         else:
             assert name in names, f"{name} not passed by name"
 
-    container_spec = _resolve_in_container(monkeypatch, tmp_path, settings, names, host_env)
+    container_spec = _resolve_in_container(
+        monkeypatch, tmp_path, settings, names, host_env, visible_config
+    )
     assert container_spec == host_spec
 
 
@@ -331,3 +347,166 @@ def test_base_url_with_credentials_is_refused(host, monkeypatch):
     with pytest.raises(ai_provider.ProviderConfigError) as excinfo:
         ai_provider.container_env()
     assert "s3cret" not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Security review: secrets in URLs, injected names, the repository .env,
+# and setups that pass on the host but cannot work in a container.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://llm.example.org/v1?api-key=SECRET-QUERY-0001",
+        "https://llm.example.org/v1?key=SECRET-QUERY-0001&x=1",
+        "https://llm.example.org/v1#SECRET-QUERY-0001",
+        "https://bob:SECRET-QUERY-0001@llm.example.org/v1",
+    ],
+)
+def test_openai_compatible_url_with_a_secret_is_refused(host, base_url):
+    install, _ = host
+    install(Case("openai_compatible", config={"provider": "openai_compatible",
+                 "openai_compatible": {"base_url": base_url, "model": "m"}}))
+    with pytest.raises(ai_provider.ProviderConfigError, match="query string") as excinfo:
+        ai_provider.container_env()
+    assert "SECRET-QUERY-0001" not in str(excinfo.value)
+    assert "https://llm.example.org/v1" in str(excinfo.value)
+
+
+def test_azure_endpoint_with_a_query_is_refused(host):
+    install, _ = host
+    install(Case("azure", config={"provider": "azure", "azure": {
+        "endpoint": "https://r.openai.azure.com/?api-key=SECRET-QUERY-0001",
+        "deployment": "d", "api_version": "2024-10-21"}},
+        secrets={"AZURE_OPENAI_API_KEY": "fake"}))
+    with pytest.raises(ai_provider.ProviderConfigError) as excinfo:
+        ai_provider.container_env()
+    assert "SECRET-QUERY-0001" not in str(excinfo.value)
+
+
+INJECTION = 'X}"; touch /tmp/pwn2; #'
+
+
+def test_injected_key_variable_name_is_refused(host):
+    install, _ = host
+    install(Case("openai_compatible", config={"provider": "openai_compatible",
+                 "openai_compatible": {"base_url": "http://llm.internal:8000/v1",
+                                       "model": "m", "api_key_env": INJECTION}}))
+    with pytest.raises(ai_provider.ProviderConfigError, match="must name an environment variable"):
+        ai_provider.container_env()
+
+
+@pytest.mark.parametrize("where", ["secret", "setting"])
+def test_every_builder_refuses_an_invalid_name(tmp_path, where):
+    from uorca.batch import container_env as ce
+
+    if where == "secret":
+        cenv = ai_provider.ContainerEnv(settings={}, secret_names=(INJECTION,))
+    else:
+        cenv = ai_provider.ContainerEnv(settings={INJECTION: "v"}, secret_names=())
+    builders = [
+        lambda: ce.docker_env_args(cenv, home=tmp_path),
+        lambda: ce.docker_env_shell(cenv, tmp_path, "/workspace/src"),
+        lambda: ce.apptainer_env_shell(cenv),
+    ]
+    for build in builders:
+        with pytest.raises(ValueError, match="not a valid environment variable name"):
+            build()
+
+
+def test_aws_bind_quotes_home_with_spaces(tmp_path):
+    """$HOME stays one argument: APPTAINER_BIND, not the word-split $BIND string."""
+    from uorca.batch import container_env as ce
+
+    cenv = ai_provider.ContainerEnv(settings={}, secret_names=(), needs_aws_config=True)
+    project = tmp_path / "repo"
+    project.mkdir()
+    (project / ".env").write_text("OPENAI_API_KEY=SECRET-DOTENV-0001\n")
+    shell = ce.apptainer_binds_shell(cenv, project, "/workspace")
+    home = tmp_path / "my home"
+    (home / ".aws").mkdir(parents=True)
+    temp = tmp_path / "tmp dir"
+    temp.mkdir()
+    out = subprocess.run(
+        ["bash", "-c", shell + '\nprintf "%s" "$APPTAINER_BIND"'],
+        env={"HOME": str(home), "TEMP_DIR": str(temp), "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert out == (
+        f"{home}/.aws:{home}/.aws:ro,{temp}/{ce.EMPTY_ENV_NAME}:/workspace/.env:ro"
+    )
+    assert (temp / ce.EMPTY_ENV_NAME).read_text() == ""
+
+
+def test_docker_masks_the_repository_dotenv(tmp_path):
+    from uorca.batch import container_env as ce
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    assert ce.docker_dotenv_mask_args(project, "/workspace/src", scratch) == []  # no .env
+
+    (project / ".env").write_text("OPENAI_API_KEY=SECRET-DOTENV-0001\n")
+    args = ce.docker_dotenv_mask_args(project, "/workspace/src", scratch)
+    empty = scratch / ce.EMPTY_ENV_NAME
+    assert args == ["-v", f"{empty}:/workspace/src/.env:ro"]
+    assert empty.read_text() == ""
+
+
+def test_local_run_masks_the_dotenv_when_the_repository_has_one(host, monkeypatch, tmp_path):
+    """The real Docker argv: masked iff the repository mounted at /workspace/src has .env."""
+    install, _ = host
+    install(CASES[0])
+    from uorca.batch import local
+
+    project_root = Path(local.__file__).resolve().parent.parent.parent
+    argv, _ = _docker_argv(monkeypatch, tmp_path)
+    masked = any(a.endswith(":/workspace/src/.env:ro") for a in argv)
+    assert masked == (project_root / ".env").exists()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        (Case("google-vertex", config={"provider": "google-vertex", "google-vertex": {
+            "model": "gemini-2.5-pro", "project": "p"}}), "Vertex AI is not supported"),
+        (Case("openai_compatible", config={"provider": "openai_compatible",
+              "openai_compatible": {"base_url": "http://localhost:11434/v1", "model": "m"}}),
+         "host.docker.internal"),
+        (Case("openai_compatible", config={"provider": "openai_compatible",
+              "openai_compatible": {"base_url": "http://127.0.0.1:8000/v1", "model": "m"}}),
+         "host.docker.internal"),
+    ],
+    ids=["vertex", "localhost", "loopback"],
+)
+def test_setups_that_cannot_work_in_a_container_are_refused(host, case, expected):
+    install, _ = host
+    install(case)
+    with pytest.raises(ai_provider.ProviderConfigError, match=expected):
+        ai_provider.container_env()
+
+
+def test_bedrock_with_aws_config_file_is_refused(host, monkeypatch, tmp_path):
+    install, _ = host
+    install(CASES[6])
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "elsewhere"))
+    with pytest.raises(ai_provider.ProviderConfigError, match="AWS_CONFIG_FILE is set"):
+        ai_provider.container_env()
+
+
+def test_bedrock_with_credential_process_is_refused(host):
+    install, home = host
+    install(CASES[6])  # profile uorca-sso
+    (home / ".aws" / "config").write_text(
+        "[profile uorca-sso]\ncredential_process = /usr/local/bin/get-creds\n"
+    )
+    with pytest.raises(ai_provider.ProviderConfigError, match="credential_process"):
+        ai_provider.container_env()
+
+
+def test_bedrock_aws_config_file_at_the_default_path_is_accepted(host, monkeypatch):
+    install, home = host
+    install(CASES[6])
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(home / ".aws" / "config"))
+    assert ai_provider.container_env().needs_aws_config

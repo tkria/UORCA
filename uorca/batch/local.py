@@ -24,7 +24,7 @@ from dotenv import load_dotenv, find_dotenv
 from uorca.ai_provider import container_env
 
 from .base import BatchProcessor
-from .container_env import docker_env_args
+from .container_env import docker_dotenv_mask_args, docker_env_args
 
 
 def run_single_dataset_local(accession: str, output_dir: str, resource_dir: str,
@@ -133,6 +133,9 @@ def run_single_dataset_local(accession: str, output_dir: str, resource_dir: str,
         # the command line (visible to ps) or in the status file. For Bedrock this
         # also mounts ~/.aws read-only.
         cmd += docker_env_args(container_env())
+        # The repository (mounted above) may hold a .env with every key in it, and the
+        # pipeline calls load_dotenv(): hide it behind an empty read-only file.
+        cmd += docker_dotenv_mask_args(project_root, '/workspace/src', temp_dir)
 
         # Use the specified Docker image and run command
         # Don't use 'uv run' - the container's venv is already in PATH via env vars

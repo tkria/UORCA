@@ -38,7 +38,7 @@ echo "Using temporary directory: ${TEMP_DIR}"
 BIND="-B {{ project_root }}:/workspace \
       -B {{ output_dir }}:/UORCA_results \
       -B ${TEMP_DIR}:/tmp"
-{{ apptainer_aws_bind }}
+{{ apptainer_binds }}
 
 {{ apptainer_env }}
 

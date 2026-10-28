@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from uorca.ai_provider import container_env
 
 from .base import BatchProcessor
-from .container_env import apptainer_aws_bind_shell, apptainer_env_shell, docker_env_shell
+from .container_env import apptainer_binds_shell, apptainer_env_shell, docker_env_shell
 
 
 class SlurmBatchProcessor(BatchProcessor):
@@ -438,7 +438,7 @@ echo "Using temporary directory: ${{TEMP_DIR}}"
 # Bind-mounts for Apptainer (all paths from config)
 BIND="{bind_mounts} \\
       -B ${{TEMP_DIR}}:/tmp"
-{apptainer_aws_bind_shell(cenv)}
+{apptainer_binds_shell(cenv, project_root.resolve(), str(project_root.resolve()))}
 
 {apptainer_env_shell(cenv)}
 
@@ -499,8 +499,8 @@ rm -rf ${{TEMP_DIR}}
         # Render template with parameters
         script_content = template.render(
             apptainer_env=apptainer_env_shell(cenv),
-            apptainer_aws_bind=apptainer_aws_bind_shell(cenv),
-            docker_env=docker_env_shell(cenv),
+            apptainer_binds=apptainer_binds_shell(cenv, project_root.resolve(), "/workspace"),
+            docker_env=docker_env_shell(cenv, project_root.resolve(), "/workspace/src"),
             accession=accession,
             output_dir=output_dir,
             logs_dir=logs_dir,
