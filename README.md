@@ -175,7 +175,7 @@ with a message that names it.
 | OpenAI (default) | `openai`, or `openai:<model>` | `OPENAI_API_KEY` | `UORCA_OPENAI_MODEL` |
 | AWS Bedrock | `bedrock` | AWS credentials (`AWS_PROFILE` and `aws sso login`, or access keys) | `UORCA_BEDROCK_MODEL`, `UORCA_BEDROCK_REGION`, `UORCA_BEDROCK_PROFILE`, `UORCA_BEDROCK_MODEL_PREFIX` |
 | Anthropic API | `anthropic:<model>` | `ANTHROPIC_API_KEY` | |
-| Google Gemini API | `google-gla:<model>` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | |
+| Google Gemini API | `google-gla:<model>` | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | |
 | Google Vertex AI | `google-vertex:<model>` | Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS` or `gcloud auth application-default login`) | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` (default `us-central1`) |
 | Groq | `groq:<model>` | `GROQ_API_KEY` | |
 | Mistral | `mistral:<model>` | `MISTRAL_API_KEY` | |
@@ -186,21 +186,33 @@ with a message that names it.
 With a bare provider name in `~/.uorca/config.yaml` (for example `provider: anthropic`), put the model in
 that provider's section (`anthropic: {model: ...}`). The `azure` and `openai_compatible` settings can also go
 in the `azure:` and `openai_compatible:` sections (`endpoint`, `deployment`, `api_version`; `base_url`,
-`model`, `api_key_env`). An unknown provider name is an error; it no longer falls back to OpenAI.
+`model`, `api_key_env`).
+
+Changes from earlier versions:
+
+- An unknown provider name is an error. It no longer falls back to OpenAI.
+- Provider names ignore case and surrounding spaces (`OpenAI` and ` openai ` both select OpenAI).
+- `provider: "openai:<model>"` now selects that model. Earlier versions ignored the part after the colon and
+  used `UORCA_OPENAI_MODEL` or `ai_provider.openai.model`.
+- `uorca identify` with Bedrock no longer needs `OPENAI_API_KEY`; it checks AWS credentials instead.
+- `uorca run` with Bedrock now stops at startup. Before, it started containers that received only
+  `OPENAI_API_KEY`, and the Docker containers then used OpenAI, not Bedrock.
 
 For an OpenAI-compatible server without a key, UORCA sends a placeholder key, never your `OPENAI_API_KEY`.
 UORCA asks for structured output through tool calls, so the server must support them (for vLLM, start it
 with tool calling enabled). Small open models are less reliable at tool calls.
 
-Current limits. These parts still need OpenAI, whichever provider you select:
+Current limits when the provider is not OpenAI:
 
-- `uorca identify` checks for `OPENAI_API_KEY` at startup.
-- The theme map that ends each identification run uses OpenAI embeddings, so it needs `OPENAI_API_KEY`.
+- `uorca identify` checks the selected provider's key at startup. The theme map at the end of the run uses
+  OpenAI embeddings, so it is skipped with a message (it never sends your text to OpenAI when another
+  provider is selected). The rest of the identification run still completes.
+- `uorca run local` and `uorca run slurm` stop at startup: they pass only `OPENAI_API_KEY` into the pipeline
+  containers, so pipeline runs need the `openai` provider for now.
 - The AI assistant tab checks for `OPENAI_API_KEY`, and its main agent uses the model in
   `uorca/config/ai_assistant_config.json`.
-- `uorca run local` and `uorca run slurm` pass only `OPENAI_API_KEY` into the container.
-- The Project Setup page offers only OpenAI and Bedrock. Set the other providers in `.env` or
-  `~/.uorca/config.yaml`.
+- The Project Setup page edits only the OpenAI and Bedrock settings. It shows any other configured provider
+  and keeps it unless you choose to replace it. Set the other providers in `.env` or `~/.uorca/config.yaml`.
 
 Only OpenAI and Bedrock have had real calls. The other providers are covered by contract tests
 (`tests/contract/`), which use fake keys and stored responses. These tests check that UORCA builds the right
