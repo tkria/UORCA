@@ -29,11 +29,12 @@ groups:
 contrasts:
   required:
     # Pim1 knockout MDSCs vs wild type. PIM1 is upstream of PPARG-mediated activity, so this is indirect evidence on PPARG.
-    - {target: [Pim1_KO], reference: [WT], type: main_effect, role: supporting}
+    - {target: [Pim1_KO], reference: [WT], contrast_type: perturbation_vs_control, show_by_default: true,
+       rule: owner 2026-10-28,
+       reason: "Loss of PIM1 removes PPARG-mediated lipid oxidation in MDSCs (enforced PPARG rescues it), so this contrast shows PPARG-dependent genes indirectly."}
   optional: []
-  not_primary: []
+  not_shown_by_default: []
   must_be_absent: []
-  expected_default: ["Pim1_KO - WT"]  # the only contrast; default via the "no primary" guard
 
 current_run:
   formula: "~0 + genotype"
@@ -41,6 +42,9 @@ current_run:
   required_present: 1  # of 1
   required_missing: []
 
+owner_answers:  # 2026-10-28
+  Q7b: "Roles replaced by show_by_default + reason and an objective contrast_type."
+  Q7c: "show_by_default true for this dataset."
+
 owner_to_confirm:
-  - "Role under the assumed question: supporting (indirect PPARG link, so the dataset gets a 'no direct match' flag) or primary?"
   - "No other contrast is expected; confirm."

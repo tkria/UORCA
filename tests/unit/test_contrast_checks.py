@@ -381,3 +381,123 @@ def test_gse298581_cell_line_effects_section():
         names,
     )
     assert inter.is_valid and inter.shape == "interaction"
+
+
+
+# --- contrast_type (owner decision 2026-10-28) ------------------------------
+
+
+@pytest.mark.parametrize(
+    "expr,contrast_type",
+    [
+        ("A - B", "perturbation_vs_control"),
+        ("A - B", "rescue_vs_perturbation"),
+        ("A - B", "dose_vs_dose"),
+        ("(A + B)/2 - C", "average"),
+        ("(A - B) - (C - D)", "interaction"),
+        ("(A - B) - (C - D)", "other"),
+        ("A - B", "other"),
+    ],
+)
+def test_contrast_type_matching_the_weights_is_accepted(expr, contrast_type):
+    check = check_contrast("c", expr, _names(), contrast_type=contrast_type)
+    assert check.is_valid, check.issues
+
+
+@pytest.mark.parametrize(
+    "expr,contrast_type",
+    [
+        ("A - B", "interaction"),
+        ("A - B", "average"),
+        ("(A - B) - (C - D)", "perturbation_vs_control"),
+        ("(A + B)/2 - C", "rescue_vs_control"),
+    ],
+)
+def test_contrast_type_contradicting_the_weights_is_rejected(expr, contrast_type):
+    check = check_contrast("c", expr, _names(), contrast_type=contrast_type)
+    assert [i.code for i in check.errors] == ["type_mismatch"]
+
+
+def test_unknown_contrast_type_is_rejected():
+    check = check_contrast("c", "A - B", _names(), contrast_type="main_effect")
+    assert [i.code for i in check.errors] == ["unknown_contrast_type"]
+
+
+def test_check_contrasts_reads_the_contrast_type_column():
+    df = pd.DataFrame(
+        {
+            "name": ["a", "b", "c"],
+            "expression": ["A - B", "(A - B) - (C - D)", "C - D"],
+            "contrast_type": ["perturbation_vs_control", "dose_vs_control", None],
+        }
+    )
+    report = check_contrasts(df, LEVELS)
+    assert [c.is_valid for c in report.checks] == [True, False, True]
+    assert report.checks[1].errors[0].code == "type_mismatch"
+    with pytest.raises(ValueError, match="must be a string"):
+        check_contrasts([{"name": "a", "expression": "A - B", "contrast_type": 3}], LEVELS)
+
+
+def _case_items(case: dict) -> list[dict]:
+    items: list[dict] = []
+    for section in ("required", "optional", "not_shown_by_default"):
+        items += case["contrasts"].get(section, [])
+    items += case.get("cell_line_effects", {}).get("required", [])
+    return items
+
+
+@pytest.mark.parametrize("accession", EVAL_CASES)
+def test_eval_case_items_use_the_owner_schema(accession):
+    from uorca.core.contrast_checks import CONTRAST_TYPES
+
+    case = _load_case(accession)
+    assert "not_primary" not in case["contrasts"]
+    for item in _case_items(case):
+        assert "role" not in item and "type" not in item, item
+        assert item["contrast_type"] in CONTRAST_TYPES, item
+        assert isinstance(item.get("reason"), str) and item["reason"].strip(), item
+    for item in case["contrasts"]["required"] + case["contrasts"].get("optional", []):
+        assert item["show_by_default"] in (True, False, "pending_owner"), item
+    for item in case["contrasts"].get("not_shown_by_default", []):
+        assert item.get("show_by_default", False) is False
+
+
+@pytest.mark.parametrize("accession", EVAL_CASES)
+def test_eval_case_contrast_types_match_their_weights(accession):
+    """Each target/reference item, written as an expression, passes the
+    weight-shape check for its declared contrast_type."""
+    case = _load_case(accession)
+    levels = {label: label for label in case["groups"]}
+    levels.update({label: label for label in case.get("cell_line_effects", {}).get("groups", {})})
+    names = level_name_map(levels)
+    for item in _case_items(case):
+        if "target" not in item:
+            continue  # any_pair_within: every pair is pairwise by construction
+        target, reference = item["target"], item["reference"]
+        expr = (
+            f"({' + '.join(target)})/{len(target)} - ({' + '.join(reference)})/{len(reference)}"
+        )
+        check = check_contrast("c", expr, names, contrast_type=item["contrast_type"])
+        assert check.is_valid, (item, [i.message for i in check.issues])
+
+
+def test_gse295568_rescue_rule():
+    case = _load_case("GSE295568")
+    items = case["contrasts"]["required"] + case["contrasts"]["optional"]
+    rescue = [i for i in items if i["contrast_type"].startswith("rescue_vs")]
+    assert len(rescue) == 6
+    for item in rescue:
+        assert item["rule"] == "owner-default 2026-10-28"
+        assert item["show_by_default"] is (item["contrast_type"] == "rescue_vs_perturbation")
+    dlx6 = [i for i in rescue if i["target"] == ["EVT_shPPARG_DLX6"] and i["reference"] == ["EVT_shPPARG"]]
+    assert dlx6 and dlx6[0]["contrast_type"] == "rescue_vs_perturbation"
+
+
+@pytest.mark.parametrize(
+    "accession,shown", [("GSE166308", True), ("GSE324244", False), ("GSE132902", True)]
+)
+def test_simple_cases_follow_owner_answers(accession, shown):
+    items = _load_case(accession)["contrasts"]["required"]
+    assert [i["show_by_default"] for i in items] == [shown]
+    assert [i["rule"] for i in items] == ["owner 2026-10-28"]
+    assert [i["contrast_type"] for i in items] == ["perturbation_vs_control"]
