@@ -247,6 +247,25 @@ cat("  output_dir =", output_dir, "\n")
 cat("  tx2gene_file =", tx2gene_file, "\n")
 cat("  contrasts_file =", contrasts_file, "\n\n")
 
+# The argument block above is kept verbatim: the download bundle replaces it
+# with fixed values (uorca/gui/components/helpers/__init__.py).
+usage <- "Usage: Rscript RNAseq.R <sample_table.csv> <group_column> <output_dir> <tx2gene.txt|NA> [contrasts.csv]"
+if (length(metadata_file) != 1 || is.na(metadata_file) || !file.exists(metadata_file)) {
+    stop("Sample table not found: '", metadata_file, "'. ", usage)
+}
+if (length(merged_group) != 1 || is.na(merged_group) || !nzchar(merged_group)) {
+    stop("No group column given. ", usage)
+}
+if (length(output_dir) != 1 || is.na(output_dir) || !nzchar(output_dir)) {
+    stop("No output directory given. ", usage)
+}
+if (length(tx2gene_file) != 1 || is.na(tx2gene_file)) {
+    stop("No tx2gene file given (pass NA for none). ", usage)
+}
+if (tx2gene_file != "NA" && !file.exists(tx2gene_file)) {
+    stop("tx2gene file not found: '", tx2gene_file, "'. Pass NA to run without one.")
+}
+
 
 # 1. MDS Plot
 plot_mds <- function(dge, output_dir, groups = group_data, labels_column = "geo_accession",
