@@ -41,8 +41,10 @@ def create_uorca_agent(selected_contrasts_key: str = "") -> Optional[Agent]:
     Args:
         selected_contrasts_key: String representation of selected contrasts for cache invalidation
     """
-    # Imported here, not at module level: `mcp` loads pywin32 at import time on Windows, and a
-    # failure there must not stop the AI tab (or Explore) from loading and showing the error.
+    # Imported here, not at module level, so importing this module does not load `mcp` (which
+    # loads pywin32 at import time on Windows). This alone does not keep `mcp` out of the AI
+    # tab: ai_assistant_tab.py still imports uorca.gui.mcp_server, which imports `mcp`, at
+    # module level. A failure there is contained by the tab guard (render_tab_safely).
     from pydantic_ai.mcp import MCPServerStdio
 
     # Load configuration
