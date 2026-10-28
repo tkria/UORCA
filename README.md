@@ -195,8 +195,8 @@ Changes from earlier versions:
 - `provider: "openai:<model>"` now selects that model. Earlier versions ignored the part after the colon and
   used `UORCA_OPENAI_MODEL` or `ai_provider.openai.model`.
 - `uorca identify` with Bedrock no longer needs `OPENAI_API_KEY`; it checks AWS credentials instead.
-- `uorca run` with Bedrock now stops at startup. Before, it started containers that received only
-  `OPENAI_API_KEY`, and the Docker containers then used OpenAI, not Bedrock.
+- `uorca run` passes the selected provider into the pipeline containers. Before, the containers received
+  only `OPENAI_API_KEY`, so the Docker containers used OpenAI even when Bedrock was selected.
 
 For an OpenAI-compatible server without a key, UORCA sends a placeholder key, never your `OPENAI_API_KEY`.
 UORCA asks for structured output through tool calls, so the server must support them (for vLLM, start it
@@ -207,12 +207,47 @@ Current limits when the provider is not OpenAI:
 - `uorca identify` checks the selected provider's key at startup. The theme map at the end of the run uses
   OpenAI embeddings, so it is skipped with a message (it never sends your text to OpenAI when another
   provider is selected). The rest of the identification run still completes.
-- `uorca run local` and `uorca run slurm` stop at startup: they pass only `OPENAI_API_KEY` into the pipeline
-  containers, so pipeline runs need the `openai` provider for now.
 - The AI assistant tab checks for `OPENAI_API_KEY`, and its main agent uses the model in
   `uorca/config/ai_assistant_config.json`.
 - The Project Setup page edits only the OpenAI and Bedrock settings. It shows any other configured provider
   and keeps it unless you choose to replace it. Set the other providers in `.env` or `~/.uorca/config.yaml`.
+
+#### How keys reach the pipeline containers
+
+`uorca run` checks the selected provider's key on your machine first and stops if it is missing. It then
+gives each pipeline container the provider setting (provider, model, region, endpoint, base URL) by value,
+so the container resolves the same model as your machine without reading `~/.uorca/config.yaml`. Keys are
+passed **by variable name only**. No key value is written to an sbatch script, a job folder, a log or a
+result file, or put on a command line that `ps` can show.
+
+| Backend | How a key reaches the container |
+|---|---|
+| `uorca run local` (Docker) | `docker run -e NAME` without a value. Docker copies the value from the environment of the `docker` process, which inherits UORCA's environment (including `.env`). |
+| `uorca run slurm`, Apptainer | `sbatch --export=ALL` copies the submitting shell's environment into the job. The script then runs `export APPTAINERENV_NAME="${NAME}"` for each key that is set; `APPTAINERENV_` variables pass `--cleanenv`. |
+| `uorca run slurm`, Docker engine | As for SLURM, then `docker run -e NAME` inside the job. |
+
+Variables passed by name: `ENTREZ_EMAIL` and `ENTREZ_API_KEY`, plus the selected provider's key variables
+from the table above (for Gemini both `GOOGLE_API_KEY` and `GEMINI_API_KEY`; for an OpenAI-compatible
+server, the variable named by `UORCA_OPENAI_COMPATIBLE_API_KEY_ENV`). Another provider's key, such as
+`OPENAI_API_KEY` when Anthropic is selected, is not passed.
+
+**AWS Bedrock.** The AWS variables `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`AWS_SESSION_TOKEN`, `AWS_REGION` and `AWS_DEFAULT_REGION` are passed by name, and `~/.aws` is mounted
+read-only (at `/root/.aws` for Docker, at the same path for Apptainer), so profiles and AWS SSO tokens work.
+Run `aws sso login` before you submit. The SSO token must still be valid when each job **starts and while it
+runs**, because the read-only mount means a job cannot refresh it. On a busy SLURM queue, a job can start after a short session has expired, and it then fails with an
+AWS credentials error.
+
+Other notes:
+
+- An OpenAI-compatible server at `localhost` on your machine is not `localhost` inside a Docker container.
+  Use `http://host.docker.internal:<port>/v1` (Docker Desktop), or a host name the compute nodes can reach.
+  A base URL that contains `user:password@` is refused for `uorca run`; put the key in the variable named
+  by `UORCA_OPENAI_COMPATIBLE_API_KEY_ENV`.
+- Google Vertex AI: `GOOGLE_APPLICATION_CREDENTIALS` is passed by name, but the file it points to must be
+  inside a directory the container can see. This is not mounted for you.
+- The real Docker and SLURM paths have not been run with a provider other than OpenAI. Unit tests check the
+  generated commands and scripts.
 
 Only OpenAI and Bedrock have had real calls. The other providers are covered by contract tests
 (`tests/contract/`), which use fake keys and stored responses. These tests check that UORCA builds the right

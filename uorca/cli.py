@@ -302,6 +302,9 @@ def _load_environment_variables():
 def _ai_provider_problems(require_ai: Optional[str]) -> tuple[list[str], bool]:
     """Check the selected AI provider for an ``identify`` or ``run`` command.
 
+    ``run`` passes the provider settings and keys (by name) into the pipeline
+    containers (``uorca.batch.container_env``), so both commands need the same check.
+
     Returns ``(problems, needs_openai_key)``. *problems* are messages for a setting or
     credential that is wrong; *needs_openai_key* is True when the selected provider is
     OpenAI, whose missing key keeps the original ``OPENAI_API_KEY`` instructions.
@@ -319,20 +322,10 @@ def _ai_provider_problems(require_ai: Optional[str]) -> tuple[list[str], bool]:
     if spec.provider == "openai":
         return [], True
 
-    if require_ai == "run":
-        # The pipeline containers (uorca/batch/local.py, slurm.py and the sbatch
-        # templates) receive only OPENAI_API_KEY, ENTREZ_EMAIL and ENTREZ_API_KEY. Another
-        # provider's key would not reach them, and Docker does not see ~/.uorca, so the
-        # run would fail inside every job or quietly use OpenAI instead. Stop here.
-        return [
-            f"The AI provider is '{spec.display_name}', but `uorca run` passes only "
-            "OPENAI_API_KEY into the pipeline containers, so only the 'openai' provider "
-            "works for pipeline runs. Set UORCA_AI_PROVIDER=openai (and OPENAI_API_KEY) "
-            "for this run."
-        ], False
-
     try:
         ai_provider.check_provider_credentials(spec)
+        if require_ai == "run":
+            ai_provider.container_env(spec)  # fails now, not inside every job
     except ai_provider.ProviderConfigError as exc:
         return [str(exc)], False
     return [], False

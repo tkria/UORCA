@@ -76,14 +76,22 @@ def test_identify_with_bedrock_checks_aws_credentials(monkeypatch, capsys):
     cli._check_environment_requirements(require_ai="identify")
 
 
-@pytest.mark.parametrize("setting", ["anthropic:claude-x", "bedrock"])
-def test_run_refuses_providers_the_containers_cannot_use(monkeypatch, capsys, setting):
-    monkeypatch.setenv("UORCA_AI_PROVIDER", setting)
-    monkeypatch.setenv("OPENAI_API_KEY", "fake")
+@pytest.mark.parametrize("step", ["identify", "run"])
+def test_non_openai_provider_does_not_block_run(monkeypatch, capsys, step):
+    """``run`` no longer stops for another provider; the containers now get its key."""
+    monkeypatch.setenv("UORCA_AI_PROVIDER", "anthropic:claude-x")
+    assert "ANTHROPIC_API_KEY" in _exits(capsys, require_ai=step)
+
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake")
-    out = _exits(capsys, require_ai="run")
-    assert "passes only OPENAI_API_KEY into the pipeline containers" in out
-    assert "UORCA_AI_PROVIDER=openai" in out
+    cli._check_environment_requirements(require_ai=step)  # no OPENAI_API_KEY needed
+
+
+def test_run_with_bedrock_checks_aws_credentials(monkeypatch, capsys):
+    monkeypatch.setenv("UORCA_AI_PROVIDER", "bedrock")
+    assert "AWS_PROFILE" in _exits(capsys, require_ai="run")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "fake")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake")
+    cli._check_environment_requirements(require_ai="run")
 
 
 def test_invalid_provider_setting_is_reported(monkeypatch, capsys):
