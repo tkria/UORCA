@@ -50,6 +50,15 @@ def _samples(accession: str) -> pd.DataFrame:
         ("characteristics_ch1.0.cell line", "characteristics_ch1.0.cell.line"),
         ("3–20 h", "X3.20.h"),
         ("1 μM", "X1.μM"),
+        # Non-ASCII, checked against R 4.x on macOS (UTF-8 locale).
+        ("x²", "x."),
+        ("½dose", "X.dose"),
+        ("dose½", "dose."),
+        ("٣abc", "٣abc"),
+        ("३x", "३x"),
+        ("Ⅻ", "Ⅻ"),
+        ("x\u0301", "x."),
+        ("CD45+F4/80+CD11b+EGFP+", "CD45.F4.80.CD11b.EGFP."),
     ],
 )
 def test_r_make_names_matches_r(raw, expected):
@@ -166,9 +175,30 @@ def test_multiple_group_columns_are_joined_like_the_pipeline():
     assert result.group_levels == ["a_1", "b_2"]
 
 
-def test_singleton_group_raises():
-    with pytest.raises(DesignValidationError, match="fewer than 2 replicates"):
-        validate_design(_table(["A", "A", "B"]), ["g"])
+def test_singleton_group_is_reported_not_raised():
+    result = validate_design(_table(["A", "A", "B", "B", "C"]), ["g"])
+    assert result.small_groups == {"C": 1}
+    assert result.to_dict()["small_groups"] == {"C": 1}
+    assert result.residual_df == 2
+
+
+def test_gse288554_with_six_singleton_groups_validates():
+    result = validate_design(_samples("GSE288554"), ["characteristics_ch1.4.treatment"])
+    assert len(result.group_levels) == 12
+    assert len(result.small_groups) == 6
+    assert result.residual_df == 6
+
+
+def test_gse161060_groups_that_merge_in_r_raise():
+    with pytest.raises(DesignValidationError, match="same R name") as exc:
+        validate_design(_samples("GSE161060"), ["characteristics_ch1.1.cell type"])
+    assert "CD45.F4.80.CD11b.EGFP." in str(exc.value)
+
+
+def test_joining_group_columns_that_merge_groups_raises():
+    df = pd.DataFrame({"x": ["a_b", "a_b", "a", "a"], "y": ["c", "c", "b_c", "b_c"]})
+    with pytest.raises(DesignValidationError, match="merges different groups"):
+        validate_design(df, ["x", "y"])
 
 
 def test_no_residual_df_raises():

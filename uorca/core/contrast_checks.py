@@ -8,9 +8,15 @@ The contrast design step returns expressions such as ``"A - B"`` or
 - Every token is a real group level, after the same renaming that R applies
   (``make.names`` on the levels, then a literal, longest-first replacement of
   each raw level in the expression; see ``RNAseq.R`` around line 411 and 524).
-- The weights sum to zero and the positive weights sum to 1, so an unscaled
-  ``A + B - C - D`` is rejected. A difference of two balanced contrasts,
-  ``(A - B) - (C - D)``, is accepted as an interaction.
+- The shape is classified from the weight vector alone, never from how the
+  expression is written. Accepted: a pairwise contrast (+1/-1), a scaled
+  average (positive weights sum to 1, negative to -1), or an interaction
+  (four groups with weights +1, +1, -1, -1, a contrast of contrasts). Anything
+  else, such as ``2*A - 2*B`` or a six-group ``(A-B)-(C-D)-(E-F)``, is
+  rejected.
+- A level whose raw text occurs inside another level is corrupted by the
+  substring replacement in ``RNAseq.R``; this is reported as a distinct
+  ``sanitisation_fault``.
 - A contrast that compares groups in different levels of a block that is
   determined by the group (for example a batch that each group lies in)
   gets a warning.
@@ -24,7 +30,7 @@ import difflib
 import re
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Iterable, Literal, Mapping, Sequence
+from typing import Iterable, Literal, Mapping
 
 import pandas as pd
 
@@ -46,6 +52,7 @@ IssueCode = Literal[
     "no_levels",
     "weights_not_zero_sum",
     "unscaled",
+    "sanitisation_fault",
     "crosses_nested_block",
 ]
 Severity = Literal["error", "warning"]
@@ -187,6 +194,31 @@ def to_r_expression(expression: str, level_names: Mapping[str, str]) -> str:
     return expr
 
 
+def sanitisation_faults(level_names: Mapping[str, str]) -> dict[str, tuple[str, list[str]]]:
+    """Predict which levels ``RNAseq.R``'s substring replacement corrupts.
+
+    ``RNAseq.R`` replaces each raw level with its R name by a literal
+    substring replacement, longest first. A level whose raw text occurs
+    inside another level's text is replaced inside it too. Example
+    (GSE210935): ``8h_GM`` is a prefix of ``8h_GMTGW``, which becomes
+    ``XXX8h_GMTGW``.
+
+    Returns:
+        ``{corrupted level: (what R produces, [levels whose text caused it])}``.
+    """
+    faults: dict[str, tuple[str, list[str]]] = {}
+    for level, r_name in level_names.items():
+        produced = to_r_expression(level, level_names)
+        if produced != r_name:
+            culprits = sorted(
+                other
+                for other, other_r in level_names.items()
+                if other != level and other != other_r and (other in level or other in r_name)
+            )
+            faults[level] = (produced, culprits)
+    return faults
+
+
 # --- parser -----------------------------------------------------------------
 
 _NUMBER = re.compile(r"(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
@@ -256,25 +288,20 @@ class _Parser:
         self.pos += 1
         return tok
 
-    def parse(self) -> tuple[_Lin, list[_Lin]]:
-        """Return the whole combination and its signed top-level terms."""
-        total, terms = self._expr()
+    def parse(self) -> _Lin:
+        """Return the linear combination the expression denotes."""
+        total = self._expr()
         leftover = self._peek()
         if leftover is not None:
             raise ContrastParseError(f"unexpected token {leftover[1]!r}")
-        return total, terms
+        return total
 
-    def _expr(self) -> tuple[_Lin, list[_Lin]]:
-        first = self._term()
-        terms = [first]
-        total = first
+    def _expr(self) -> _Lin:
+        total = self._term()
         while self._peek() in (("op", "+"), ("op", "-")):
             sign = 1 if self._next()[1] == "+" else -1
-            term = self._term()
-            signed = _scale(term, Fraction(sign))
-            terms.append(signed)
-            total = _add(total, term, sign)
-        return total, terms
+            total = _add(total, self._term(), sign)
+        return total
 
     def _term(self) -> _Lin:
         left = self._factor()
@@ -303,7 +330,7 @@ class _Parser:
         if (kind, value) == ("op", "+"):
             return self._factor()
         if (kind, value) == ("op", "("):
-            inner, _ = self._expr()
+            inner = self._expr()
             if self._next() != ("op", ")"):
                 raise ContrastParseError("missing closing parenthesis")
             return inner
@@ -316,25 +343,33 @@ class _Parser:
         raise ContrastParseError(f"unexpected token {value!r}")
 
 
-def _is_balanced_unit(weights: Mapping[str, Fraction]) -> bool:
-    nonzero = [w for w in weights.values() if w != 0]
-    if not nonzero:
-        return False
-    pos = sum((w for w in nonzero if w > 0), Fraction(0))
-    return abs(float(sum(nonzero, Fraction(0)))) <= WEIGHT_TOLERANCE and abs(
-        float(pos) - 1
-    ) <= WEIGHT_TOLERANCE
+def _close(a: Fraction, b: float) -> bool:
+    return abs(float(a) - b) <= WEIGHT_TOLERANCE
 
 
-def _shape(weights: Mapping[str, Fraction], terms: Sequence[_Lin]) -> ContrastShape:
+def classify_weights(weights: Mapping[str, Fraction]) -> ContrastShape:
+    """Classify a contrast from its non-zero weights alone.
+
+    - ``pairwise``: one +1 and one -1.
+    - ``average``: positive weights sum to 1 and negative weights to -1.
+    - ``interaction``: exactly four weights, two +1 and two -1. This is a
+      difference of two unit contrasts; ``A - B - C + D``,
+      ``(A + D) - (B + C)`` and ``(A - B) - (C - D)`` are the same vector.
+    - ``other``: anything else (rejected).
+    """
     pos = [w for w in weights.values() if w > 0]
     neg = [w for w in weights.values() if w < 0]
-    if _is_balanced_unit(weights):
-        return "pairwise" if len(pos) == 1 and len(neg) == 1 else "average"
-    # A difference of balanced contrasts, such as (A - B) - (C - D). Each
-    # signed top-level term must itself be a balanced contrast.
-    if len(terms) >= 2 and all(
-        _is_balanced_unit(t[0]) or _is_balanced_unit(_scale(t, Fraction(-1))[0]) for t in terms
+    if not pos or not neg:
+        return "other"
+    if len(pos) == 1 and len(neg) == 1 and _close(pos[0], 1) and _close(neg[0], -1):
+        return "pairwise"
+    if _close(sum(pos, Fraction(0)), 1) and _close(sum(neg, Fraction(0)), -1):
+        return "average"
+    if (
+        len(pos) == 2
+        and len(neg) == 2
+        and all(_close(w, 1) for w in pos)
+        and all(_close(w, -1) for w in neg)
     ):
         return "interaction"
     return "other"
@@ -374,12 +409,27 @@ def check_contrast(
     known = set(level_names.values())
     try:
         parser = _Parser(_tokenise(r_expression), known)
-        (coeffs, const), terms = parser.parse()
+        coeffs, const = parser.parse()
     except ContrastParseError as exc:
         issues.append(ContrastIssue("parse_error", "error", f"Cannot parse {expression!r}: {exc}."))
         return ContrastCheck(name, expression, r_expression, {}, "invalid", issues)
 
+    corrupted = {
+        produced: (level, culprits)
+        for level, (produced, culprits) in sanitisation_faults(level_names).items()
+    }
     for token in dict.fromkeys(parser.unknown):
+        if token in corrupted:
+            level, culprits = corrupted[token]
+            issues.append(
+                ContrastIssue(
+                    "sanitisation_fault", "error",
+                    f"Sanitisation fault: level {', '.join(repr(c) for c in culprits)} "
+                    f"is a prefix or substring of level {level!r}; RNAseq.R substring "
+                    f"replacement will corrupt it to {token!r}.",
+                )
+            )
+            continue
         close = difflib.get_close_matches(token, sorted(known), n=1)
         hint = f" Did you mean {close[0]!r}?" if close else ""
         issues.append(
@@ -396,8 +446,7 @@ def check_contrast(
     shape: ContrastShape = "invalid"
     if weights:
         total = float(sum(weights.values(), Fraction(0)))
-        pos_sum = float(sum((w for w in weights.values() if w > 0), Fraction(0)))
-        shape = _shape(weights, terms)
+        shape = classify_weights(weights)
         if abs(total) > WEIGHT_TOLERANCE:
             issues.append(
                 ContrastIssue(
@@ -405,22 +454,29 @@ def check_contrast(
                     f"Weights sum to {total:g}, not 0, so the contrast is not a comparison.",
                 )
             )
-        elif shape != "interaction" and abs(pos_sum - 1) > WEIGHT_TOLERANCE:
+        elif shape == "other":
+            shown = ", ".join(f"{k}: {float(v):g}" for k, v in weights.items())
             issues.append(
                 ContrastIssue(
                     "unscaled", "error",
-                    f"Positive weights sum to {pos_sum:g}, not 1. Scale averages, "
-                    "for example (A + B)/2 - C; write an interaction as "
-                    "(A - B) - (C - D).",
+                    f"Weights ({shown}) are not a pairwise contrast, a scaled "
+                    "average (positive weights sum to 1, negative to -1) or a "
+                    "four-group interaction (+1, +1, -1, -1). Scale averages, for "
+                    "example (A + B)/2 - C.",
                 )
             )
 
     if block_of_group and weights:
         r_to_raw = {r: raw for raw, r in level_names.items()}
+        used = [r_to_raw[k] for k in weights if k in r_to_raw]
         for block, mapping in block_of_group.items():
-            block_levels = sorted(
-                {mapping[r_to_raw[k]] for k in weights if k in r_to_raw and r_to_raw[k] in mapping}
-            )
+            missing = [lvl for lvl in used if lvl not in mapping]
+            if missing:
+                raise ValueError(
+                    f"Block {block!r} has no mapping for group levels {missing}; "
+                    "the block-of-group map does not match the contrast levels."
+                )
+            block_levels = sorted({mapping[lvl] for lvl in used})
             if len(block_levels) > 1:
                 issues.append(
                     ContrastIssue(

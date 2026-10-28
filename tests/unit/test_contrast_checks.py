@@ -38,7 +38,7 @@ EVT_SH_PPARG = (
 )
 EVT_DMSO = GSE295568_PREFIX + "Cells were differentiated into EVT for 8 days with DMSO (vehicle control)."
 
-LEVELS = ["A", "B", "C", "D"]
+LEVELS = ["A", "B", "C", "D", "E", "F"]
 
 
 def _names(levels=LEVELS):
@@ -57,6 +57,12 @@ def _names(levels=LEVELS):
         ("0.5*A + 0.5*B - C", "average", {"A": 0.5, "B": 0.5, "C": -1.0}),
         ("(A + B + C)/3 - D", "average", {"A": 1 / 3, "B": 1 / 3, "C": 1 / 3, "D": -1.0}),
         ("(A - B) - (C - D)", "interaction", {"A": 1.0, "B": -1.0, "C": -1.0, "D": 1.0}),
+        ("A - B - C + D", "interaction", {"A": 1.0, "B": -1.0, "C": -1.0, "D": 1.0}),
+        ("(A + D) - (B + C)", "interaction", {"A": 1.0, "B": -1.0, "C": -1.0, "D": 1.0}),
+        ("((A - B) - (C - D))", "interaction", {"A": 1.0, "B": -1.0, "C": -1.0, "D": 1.0}),
+        # Weights alone cannot tell this from (A + C) - (B + D) = (A - B) - (D - C).
+        ("(A - B) + (C - D)", "interaction", {"A": 1.0, "B": -1.0, "C": 1.0, "D": -1.0}),
+        ("A + B - C - D", "interaction", {"A": 1.0, "B": 1.0, "C": -1.0, "D": -1.0}),
         ("`A` - `B`", "pairwise", {"A": 1.0, "B": -1.0}),
     ],
 )
@@ -73,9 +79,12 @@ def test_valid_expressions(expr, shape, weights):
 @pytest.mark.parametrize(
     "expr,code",
     [
-        ("A + B - C - D", "unscaled"),
         ("2*A - 2*B", "unscaled"),
-        ("A - E", "unknown_level"),
+        ("(A - B) + (A - B)", "unscaled"),
+        ("(A - B) - (C - D) - (E - F)", "unscaled"),
+        ("(A + B) - C/2", "weights_not_zero_sum"),
+        ("A + B + C - 3*D", "unscaled"),
+        ("A - G", "unknown_level"),
         ("A + B - C", "weights_not_zero_sum"),
         ("A", "weights_not_zero_sum"),
         ("A - A", "no_levels"),
@@ -289,3 +298,48 @@ def test_eval_case_matches_fixture_and_current_run(accession):
     assert run["contrasts"] == len(contrasts)
     assert sum(p in present for p in required) == run["required_present"]
     assert len(required) - run["required_present"] == len(run["required_missing"])
+
+
+def test_identical_weight_vectors_get_the_same_shape():
+    names = _names()
+    forms = ["A - B - C + D", "(A + D) - (B + C)", "((A - B) - (C - D))", "(A - B) - (C - D)"]
+    checks = [check_contrast("c", f, names) for f in forms]
+    assert {c.shape for c in checks} == {"interaction"}
+    assert len({c.canonical_pair() for c in checks}) == 1
+
+
+# --- sanitisation faults (GSE210935) ---------------------------------------
+
+
+def test_gse210935_prefix_levels_are_a_sanitisation_fault():
+    from uorca.core.contrast_checks import sanitisation_faults
+
+    samples = pd.read_csv(FIXTURES / "GSE210935_samples.csv")
+    contrasts = pd.read_csv(FIXTURES / "GSE210935_contrasts.csv")
+    names = level_name_map(samples["uorca_group"].unique())
+    faults = sanitisation_faults(names)
+    # What the R log of the 2026-10-07 run shows.
+    assert faults["8h_GMTGW"][0] == "XXX8h_GMTGW"
+    assert faults["8h_GMIL4"][0] == "XX8h_GMIL4"
+    assert "8h_GM" in faults["8h_GMTGW"][1]
+    assert "8h_GM" not in faults and not any(k.startswith("MoDC") for k in faults)
+
+    report = check_contrasts(contrasts, samples["uorca_group"].unique())
+    by_expr = {c.expression: c for c in report.checks}
+    bad = by_expr["8h_GMTGW - 8h_GM"]
+    codes = {i.code for i in bad.errors}
+    assert "sanitisation_fault" in codes and "unknown_level" not in codes
+    msg = next(i.message for i in bad.errors if i.code == "sanitisation_fault")
+    assert "'8h_GM'" in msg and "'8h_GMTGW'" in msg and "XXX8h_GMTGW" in msg
+    assert by_expr["MoDC_GMTGW - MoDC_GMT"].is_valid
+
+
+def test_unknown_token_is_still_unknown_level_without_a_fault():
+    check = check_contrast("c", "8h_GMX - 8h_GM", level_name_map(["8h_GM", "8h_GMT"]))
+    assert {i.code for i in check.errors} >= {"unknown_level"}
+    assert "sanitisation_fault" not in {i.code for i in check.errors}
+
+
+def test_missing_block_mapping_raises():
+    with pytest.raises(ValueError, match=r"no mapping for group levels \['C'\]"):
+        check_contrast("c", "A - C", _names(), block_of_group={"batch": {"A": "b1", "B": "b1"}})

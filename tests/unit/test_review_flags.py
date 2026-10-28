@@ -53,15 +53,39 @@ def _codes(flags):
 def test_gse295568_is_flagged():
     flags = _pipeline_flags("GSE295568")
     assert flags.needs_review
-    assert {
-        "many_groups",
-        "few_replicates",
-        "sentence_group_labels",
-        "unused_varying_column",
-    } <= _codes(flags)
-    unused = [s for s in flags.signals if s.signal == "unused_varying_column"]
-    assert len(unused) == 1 and "characteristics_ch1.4.batch" in unused[0].reason
-    assert unused[0].severity == "medium"  # batch is not crossed with the groups
+    assert _codes(flags) == {"many_groups", "few_replicates", "sentence_group_labels"}
+    sentence = next(s for s in flags.signals if s.signal == "sentence_group_labels")
+    assert "joined" not in sentence.reason
+
+
+def test_columns_determined_by_the_group_are_not_flagged():
+    # Without knowing the source columns, the merged group's sources (tissue
+    # ... treatment) and batch are all determined by the group.
+    flags = compute_review_flags(_samples("GSE295568"), "uorca_group", [])
+    assert "unused_varying_column" not in _codes(flags)
+
+
+def test_gse161060_group_name_collision_is_flagged():
+    flags = compute_review_flags(_samples("GSE161060"), "uorca_group", [])
+    assert flags.needs_review
+    collision = [s for s in flags.signals if s.signal == "group_name_collision"]
+    assert len(collision) == 1 and collision[0].severity == "high"
+    assert "CD45.F4.80.CD11b.EGFP." in collision[0].reason
+
+
+def test_gse288554_single_sample_groups_are_high():
+    flags = compute_review_flags(_samples("GSE288554"), "uorca_group", [])
+    single = [s for s in flags.signals if s.signal == "single_sample_group"]
+    assert len(single) == 6 and {s.severity for s in single} == {"high"}
+    assert "variance cannot be estimated" in single[0].reason
+    assert flags.needs_review
+
+
+def test_missing_values_in_candidate_column_are_reported():
+    samples = pd.DataFrame({"g": ["A"] * 3 + ["B"] * 3, "c": ["x", None, "y", "x", "y", "x"]})
+    flags = compute_review_flags(samples, "g", ["g"])
+    assert [s.signal for s in flags.signals] == ["candidate_missing_values"]
+    assert "'c'" in flags.signals[0].reason
 
 
 def test_gse298581_is_flagged_for_unused_cell_line():
@@ -130,6 +154,8 @@ def test_unbalanced_and_small_groups():
     samples = pd.DataFrame({"g": ["A"] * 10 + ["B"] * 2})
     flags = compute_review_flags(samples, "g", ["g"])
     assert {"unbalanced_groups", "few_replicates"} == _codes(flags)
+    samples = pd.DataFrame({"g": ["A"] * 4 + ["B"]})
+    assert _codes(compute_review_flags(samples, "g", ["g"])) == {"unbalanced_groups", "single_sample_group"}
     assert flags.needs_review  # two medium signals
 
 

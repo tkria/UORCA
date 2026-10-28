@@ -7,14 +7,23 @@ checks. No LLM is involved, and the same input always gives the same flags.
 
 Signals computed here:
 
-- ``unused_varying_column``: a metadata column varies but is not in the design
-  (high when it is crossed with the groups, so it could be a block).
+- ``unused_varying_column`` (high): a metadata column varies, is crossed with
+  the groups (so it could be a block) and is not in the design. A column
+  whose levels are fully determined by the group (for example a source
+  column of a merged group) is not flagged.
+- ``candidate_missing_values`` (medium): a candidate column has missing
+  values, so it was not tested.
+- ``group_name_collision`` (high): two group labels get the same R name and
+  ``RNAseq.R`` would merge them.
+- ``single_sample_group`` (high): a group has fewer than
+  ``MIN_REPLICATES_PER_GROUP`` samples, so its variance cannot be estimated.
 - ``many_groups``: more than ``MAX_GROUPS`` groups.
-- ``few_replicates``: a group has fewer than ``MIN_REPLICATES_FOR_CONFIDENCE``.
+- ``few_replicates``: a group has fewer than ``MIN_REPLICATES_FOR_CONFIDENCE``
+  (but at least ``MIN_REPLICATES_PER_GROUP``).
 - ``unbalanced_groups``: the largest group is more than
   ``MAX_GROUP_SIZE_RATIO`` times the smallest.
-- ``sentence_group_labels``: group labels read like sentences, which suggests
-  several columns were joined into one factor.
+- ``sentence_group_labels``: group labels are long free text rather than
+  short condition names.
 - ``block_removed``: design validation removed a block as aliased, nested or
   confounded (needs a :class:`DesignValidationResult`).
 - ``contrast_rejected`` / ``contrast_warning``: a contrast check gave an error
@@ -34,7 +43,12 @@ from typing import Literal, Sequence
 import pandas as pd
 
 from .contrast_checks import ContrastCheck
-from .design_validation import DesignValidationResult, string_column
+from .design_validation import (
+    MIN_REPLICATES_PER_GROUP,
+    DesignValidationResult,
+    r_make_names,
+    string_column,
+)
 
 MAX_GROUPS = 8
 MIN_REPLICATES_FOR_CONFIDENCE = 3
@@ -155,25 +169,40 @@ def metadata_signals(
     for col in candidates:
         if col == group_column or col in design_columns:
             continue
+        n_missing = int(samples[col].isna().sum())
+        if n_missing:
+            signals.append(
+                ReviewSignal(
+                    "candidate_missing_values", "medium",
+                    f"'{col}' has missing values in {n_missing} of {len(samples)} "
+                    "samples, so it was not tested as a design factor.",
+                )
+            )
+            continue
         values = string_column(samples, col)
         if _partition(values) in used_partitions:
             continue  # a copy of a used column, such as source_name = cell line
         crossed = bool((pd.crosstab(group, values) > 0).sum(axis=1).gt(1).any())
-        n_levels = int(values.nunique())
-        if crossed:
-            signals.append(
-                ReviewSignal(
-                    "unused_varying_column", "high",
-                    f"'{col}' varies ({n_levels} levels) and is crossed with the groups, "
-                    "but it is not in the design. It may be a blocking factor.",
-                )
+        if not crossed:
+            continue  # determined by the group, e.g. a source column of a merged group
+        signals.append(
+            ReviewSignal(
+                "unused_varying_column", "high",
+                f"'{col}' varies ({int(values.nunique())} levels) and is crossed with "
+                "the groups, but it is not in the design. It may be a blocking factor.",
             )
-        else:
+        )
+
+    by_r_name: dict[str, list[str]] = {}
+    for lvl in sizes:
+        by_r_name.setdefault(r_make_names(lvl), []).append(lvl)
+    for r_name, lvls in by_r_name.items():
+        if len(lvls) > 1:
             signals.append(
                 ReviewSignal(
-                    "unused_varying_column", "medium",
-                    f"'{col}' varies ({n_levels} levels) but is not in the design; "
-                    "each group lies in one of its levels.",
+                    "group_name_collision", "high",
+                    f"Groups {lvls} all become {r_name!r} in R (make.names); "
+                    "RNAseq.R would merge them into one group.",
                 )
             )
 
@@ -181,7 +210,19 @@ def metadata_signals(
         signals.append(
             ReviewSignal("many_groups", "medium", f"{len(sizes)} groups (more than {MAX_GROUPS}).")
         )
-    small = {lvl: n for lvl, n in sizes.items() if n < MIN_REPLICATES_FOR_CONFIDENCE}
+    for lvl, n in sizes.items():
+        if n < MIN_REPLICATES_PER_GROUP:
+            signals.append(
+                ReviewSignal(
+                    "single_sample_group", "high",
+                    f"Group {lvl!r} has {n} sample; its variance cannot be estimated.",
+                )
+            )
+    small = {
+        lvl: n
+        for lvl, n in sizes.items()
+        if MIN_REPLICATES_PER_GROUP <= n < MIN_REPLICATES_FOR_CONFIDENCE
+    }
     if small:
         signals.append(
             ReviewSignal(
@@ -204,8 +245,9 @@ def metadata_signals(
         signals.append(
             ReviewSignal(
                 "sentence_group_labels", "medium",
-                f"{len(sentences)} of {len(sizes)} group labels read like sentences, "
-                "which suggests several columns were joined into one factor.",
+                f"{len(sentences)} of {len(sizes)} group labels are long free text "
+                "rather than short condition names; check that the grouping is "
+                "right and that the labels are readable.",
             )
         )
     return signals

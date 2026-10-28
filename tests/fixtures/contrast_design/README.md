@@ -23,6 +23,13 @@ Columns kept: `GSM`, `title`, the `characteristics_ch1.*` columns listed below
 | GSE166308 | `0.strain`, `1.genotype`, `2.tissue`, `3.cell population` | `genotype` |
 | GSE324244 | `0.tissue`, `1.genotype`, `2.treatment` | `genotype` |
 | GSE132902 | `0.tissue`, `1.subtype`, `2.treatment` | `treatment_group` |
+| GSE161060 | `source_name_ch1`, `0.tissue`, `1.cell type`, `2.strain` | `cell_type` |
+| GSE210935 | `0.tissue`, `1.cell type`, `2.donor`, `3.treatment` | `treatment_group` |
+| GSE288554 | `1.cell line`, `3.genotype`, `4.treatment` | `treatment_group` |
+
+GSE161060, GSE210935 and GSE288554 were added on 2026-10-28 as regression
+cases: two cell types that R's `make.names` merges, level names that are
+prefixes of each other (the R run failed), and 6 single-sample groups.
 
 All other columns (protocol text, contact and submission fields, SRX/SRR) were
 dropped. In the source files they are constant or are identifiers.

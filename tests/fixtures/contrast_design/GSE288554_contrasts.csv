@@ -1,0 +1,9 @@
+name,expression
+LPS_vs_DMSO_3h,LPS-3h - DMSO-3h
+Co68_vs_DMSO_3h,Co68-3h - DMSO-3h
+LPS_Co68_vs_LPS_3h,LPS-Co68-3h - LPS-3h
+LPS_Co68_vs_DMSO_3h,LPS-Co68-3h - DMSO-3h
+Timecourse_LPS_3h_vs_1h,LPS-3h - LPS-1h
+Timecourse_Co68_3h_vs_1h,Co68-3h - Co68-1h
+Timecourse_LPS_Co68_3h_vs_1h,LPS-Co68-3h - LPS-Co68-1h
+Interaction_at_3h,(LPS-Co68-3h - LPS-3h) - (Co68-3h - DMSO-3h)

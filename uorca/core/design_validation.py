@@ -14,7 +14,9 @@ Steps (plan 2026-10-27-03, section 3.1):
 3. Build the design matrix and check that it has full column rank. A crossed
    block that still makes the matrix rank-deficient is dropped as confounded.
 4. Check that the residual degrees of freedom are positive and that every
-   group has at least ``MIN_REPLICATES_PER_GROUP`` samples.
+   group has a name of its own in R. A group smaller than
+   ``MIN_REPLICATES_PER_GROUP`` does not raise; it is listed in
+   ``small_groups`` and becomes a high review flag (owner decision pending).
 
 The result serialises (``to_dict``) to the ``metadata/design.json`` structure.
 Impossible designs raise :class:`DesignValidationError`; nothing degenerate is
@@ -24,6 +26,7 @@ returned silently.
 from __future__ import annotations
 
 import logging
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Literal, Mapping, Sequence
 
@@ -33,7 +36,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 MIN_REPLICATES_PER_GROUP = 2
-"""Smallest group size accepted. limma needs replicates to estimate variance."""
+"""Groups smaller than this cannot contribute a within-group variance. They are
+reported in ``small_groups`` (and flagged for review), not rejected."""
 
 DEFAULT_GROUP_VARIABLE = "group"
 """Name of the merged group factor in the formula."""
@@ -68,6 +72,23 @@ class DesignValidationError(ValueError):
     """Raised when no valid design can be built from the inputs."""
 
 
+def _r_name_char(ch: str) -> bool:
+    """True when R keeps ``ch`` in a name (Unicode letter, letter-number or
+    decimal digit, ``.`` or ``_``). Other numbers such as ``²`` and ``½`` and
+    combining marks become ``.``, as in R 4.x in a UTF-8 locale."""
+    return ch in "._" or unicodedata.category(ch)[0] == "L" or unicodedata.category(ch) in ("Nd", "Nl")
+
+
+def _r_name_start(s: str) -> bool:
+    ch = s[0]
+    if ch == ".":
+        return not (len(s) > 1 and s[1] in "0123456789")
+    if ch in "0123456789":
+        return False
+    # R accepts a leading letter, letter-number or non-ASCII decimal digit.
+    return unicodedata.category(ch)[0] == "L" or unicodedata.category(ch) in ("Nd", "Nl")
+
+
 def r_make_names(value: object) -> str:
     """Return what R's ``make.names(value)`` returns for one string.
 
@@ -77,16 +98,16 @@ def r_make_names(value: object) -> str:
     Rules (R ``?make.names``): every character that is not a letter, a digit,
     ``.`` or ``_`` becomes ``.``; ``X`` is prepended when the name does not
     start with a letter or with a ``.`` that is not followed by a digit; a
-    reserved word gets a trailing ``.``. Letters and digits follow Unicode, as
-    R does in a UTF-8 locale.
+    reserved word gets a trailing ``.``. Non-ASCII handling was checked
+    against R 4.x on macOS in a UTF-8 locale (``x²`` -> ``x.``, ``½dose`` ->
+    ``X.dose``, a leading Arabic-Indic digit is kept without ``X``). Other
+    locales or platforms may differ.
     """
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "NA."
     s = str(value)
-    first_ok = bool(s) and (
-        s[0].isalpha() or (s[0] == "." and not (len(s) > 1 and s[1].isdigit()))
-    )
-    cleaned = "".join(ch if (ch.isalnum() or ch in "._") else "." for ch in s)
+    first_ok = bool(s) and _r_name_start(s)
+    cleaned = "".join(ch if _r_name_char(ch) else "." for ch in s)
     if not first_ok:
         cleaned = "X" + cleaned
     if cleaned in R_RESERVED_WORDS:
@@ -139,6 +160,8 @@ class DesignValidationResult:
     requested_group_columns: list[str]
     requested_block_columns: list[str]
     design_columns: list[str] = field(default_factory=list)
+    small_groups: dict[str, int] = field(default_factory=dict)
+    """Groups with fewer than ``MIN_REPLICATES_PER_GROUP`` samples."""
     sample_groups: list[str] = field(default_factory=list)
     """Group level of each sample, in the row order of the input table."""
 
@@ -164,6 +187,7 @@ class DesignValidationResult:
             "block_columns": list(self.block_columns),
             "group_levels": list(self.group_levels),
             "group_sizes": dict(self.group_sizes),
+            "small_groups": dict(self.small_groups),
             "design_columns": list(self.design_columns),
             "terms": {
                 "kept": [asdict(t) for t in self.kept_terms],
@@ -287,15 +311,16 @@ def validate_design(
         group_columns: Columns joined (with ``"_"``) into the group factor.
         block_columns: Candidate blocking factors, tried in the given order.
         group_variable: Name of the group factor in the formula.
-        min_replicates: Smallest accepted group size.
+        min_replicates: Groups below this size are listed in ``small_groups``.
 
     Returns:
         The validated design, with kept and dropped terms and their reasons.
 
     Raises:
         DesignValidationError: if a column is missing or has missing values,
-            if fewer than two groups remain, if a group is smaller than
-            ``min_replicates``, or if no residual degrees of freedom remain.
+            if fewer than two groups remain, if joining the group columns or
+            R's ``make.names`` would merge two different groups, or if no
+            residual degrees of freedom remain.
     """
     requested_groups = list(group_columns)
     requested_blocks = list(block_columns)
@@ -345,7 +370,27 @@ def validate_design(
     group = group_parts[0]
     for part in group_parts[1:]:
         group = group + GROUP_LEVEL_SEPARATOR + part
+    if len(kept_group_cols) > 1:
+        combos = set(zip(*(string_column(samples, c).tolist() for c in kept_group_cols)))
+        by_joined: dict[str, list[tuple[str, ...]]] = {}
+        for combo in sorted(combos):
+            by_joined.setdefault(GROUP_LEVEL_SEPARATOR.join(combo), []).append(combo)
+        clashes = {j: c for j, c in by_joined.items() if len(c) > 1}
+        if clashes:
+            raise DesignValidationError(
+                f"Joining {kept_group_cols} with {GROUP_LEVEL_SEPARATOR!r} merges "
+                f"different groups: {clashes}."
+            )
     group_levels = _levels(group)
+    by_r_name: dict[str, list[str]] = {}
+    for lvl in group_levels:
+        by_r_name.setdefault(r_make_names(lvl), []).append(lvl)
+    r_clashes = {r: lvls for r, lvls in by_r_name.items() if len(lvls) > 1}
+    if r_clashes:
+        raise DesignValidationError(
+            "Different groups get the same R name (make.names), so RNAseq.R would "
+            f"merge them silently: {r_clashes}."
+        )
 
     kept_blocks: dict[str, pd.Series] = {}
     for col in requested_blocks:
@@ -388,8 +433,9 @@ def validate_design(
     group_sizes = {lvl: int((group == lvl).sum()) for lvl in group_levels}
     small = {lvl: n for lvl, n in group_sizes.items() if n < min_replicates}
     if small:
-        raise DesignValidationError(
-            f"Groups with fewer than {min_replicates} replicates: {small}."
+        logger.warning(
+            "Design: groups with fewer than %d samples (no within-group variance): %s",
+            min_replicates, small,
         )
 
     kept_terms = [
@@ -431,5 +477,6 @@ def validate_design(
         requested_group_columns=requested_groups,
         requested_block_columns=requested_blocks,
         design_columns=design_names,
+        small_groups=small,
         sample_groups=group.tolist(),
     )
