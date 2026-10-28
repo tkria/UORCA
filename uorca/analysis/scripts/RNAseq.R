@@ -397,7 +397,10 @@ cat("Created analysis directory at:", analysis_dir, "\n")
 
 cat("Step 1: Loading metadata from file...\n")
 cat("Loading metadata from:", metadata_file, "\n")
-metadata <- read.csv(metadata_file, stringsAsFactors = FALSE)
+# check.names = FALSE: headers are used exactly as written (no make.names).
+# na.strings = character(0): a level spelled "NA" stays the string "NA".
+metadata <- read.csv(metadata_file, stringsAsFactors = FALSE,
+                     check.names = FALSE, na.strings = character(0))
 if (nrow(metadata) == 0) {
     stop("Metadata is empty!")
 }
