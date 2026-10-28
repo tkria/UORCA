@@ -522,8 +522,16 @@ plot_normalization(DGE_filtered, DGE.norm, output_dir)
 
 cat("Step 6: Generating design matrix using grouping column:", merged_group, "\n")
 cat("Creating design matrix using grouping column:", merged_group, "\n")
-design <- model.matrix(as.formula(paste("~0 +", merged_group)), data = DGE.norm$samples)
-colnames(design) <- sub(merged_group, "", colnames(design))
+# Build the factor directly: no formula is pasted from the column name and no
+# regex strips it from the column names. factor() orders levels as
+# model.matrix would for a character column, so the design is unchanged.
+group_factor <- factor(as.character(DGE.norm$samples[[merged_group]]))
+if (nlevels(group_factor) < 2) {
+    stop("The group column '", merged_group, "' has ", nlevels(group_factor),
+         " level(s); differential expression needs at least 2.")
+}
+design <- model.matrix(~0 + group_factor)
+colnames(design) <- levels(group_factor)
 
 plot_mds(DGE.norm, output_dir, labels_column = "geo_accession")
 
