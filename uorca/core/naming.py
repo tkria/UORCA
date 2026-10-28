@@ -173,7 +173,7 @@ def legacy_r_naming_hazards(raw_levels: Iterable[object]) -> list[str]:
     return hazards
 
 
-def check_joined_levels(rows: Sequence[Sequence[object]], separator: str = "_") -> None:
+def check_joined_levels(rows: Iterable[Sequence[object]], separator: str = "_") -> None:
     """Raise when joining several group columns merges different groups (F17).
 
     ``a_b`` + ``c`` and ``a`` + ``b_c`` both join to ``a_b_c``.

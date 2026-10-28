@@ -26,6 +26,31 @@ def _discover_files(resource_dir: Path, pattern: str) -> List[str]:
     return [str(m) for m in matches]
 
 
+def _can_reuse_quantification(state: WorkflowState) -> bool:
+    """True when a completed quantification of the current FASTQs exists.
+
+    ReflectNode resets only the checkpoint it retries from, so
+    ``kallisto_quant`` stays COMPLETED when a retry starts at metadata
+    analysis or contrast design, and is reset when the retry targets it.
+    """
+    if state.checkpoints.get("kallisto_quant") != CheckpointStatus.COMPLETED:
+        return False
+    if not state.abundance_files or not state.tx2gene_file_used:
+        return False
+    if not state.fastq_dir or state.kallisto_fastq_dir != state.fastq_dir:
+        return False
+    missing = [f for f in state.abundance_files if not Path(f).is_file()]
+    if missing:
+        logger.warning(
+            "Kallisto checkpoint is complete but %d abundance files are missing "
+            "(first: %s); quantifying again.",
+            len(missing),
+            missing[0],
+        )
+        return False
+    return True
+
+
 @dataclass
 class KallistoQuantifyNode(BaseNode[WorkflowState, WorkflowDeps, str]):
     """Run Kallisto quantification on FASTQ files."""
@@ -37,6 +62,18 @@ class KallistoQuantifyNode(BaseNode[WorkflowState, WorkflowDeps, str]):
 
         from .edger import PrepareEdgeRNode
         from .reflect import ReflectNode
+
+        if _can_reuse_quantification(ctx.state):
+            # A retry for a metadata, naming or contrast problem routes back
+            # through this node. The FASTQs have not changed, so quantifying
+            # again only costs time (GSE210935 spent ~26.6 h this way).
+            logger.info(
+                "Reusing Kallisto output from %s (%d abundance files); not re-running "
+                "Kallisto. Retry from 'kallisto_quant' to force quantification.",
+                ctx.state.kallisto_fastq_dir,
+                len(ctx.state.abundance_files or []),
+            )
+            return PrepareEdgeRNode()
 
         ctx.state.update_checkpoint("kallisto_quant", CheckpointStatus.IN_PROGRESS)
 
@@ -100,6 +137,7 @@ Select the index and tx2gene file that best match the organism "{ctx.state.organ
             ctx.state.abundance_files = kallisto_result.abundance_files
             ctx.state.kallisto_index_used = kallisto_result.index_used
             ctx.state.tx2gene_file_used = kallisto_result.tx2gene_file
+            ctx.state.kallisto_fastq_dir = ctx.state.fastq_dir
 
             if not ctx.state.abundance_files:
                 raise ValueError("Kallisto produced no abundance files")

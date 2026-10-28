@@ -39,12 +39,17 @@ class WorkflowState:
     # === Analysis configuration ===
     merged_column: Optional[str] = None  # Grouping variable name
     unique_groups: Optional[List[str]] = None  # Unique values
+    # Column of R level names given to RNAseq.R (uorca.core.naming.R_GROUP_COLUMN)
+    r_group_column: Optional[str] = None
+    group_level_names: Optional[Dict[str, str]] = None  # raw level -> R name
+    group_source_columns: Optional[List[str]] = None
     contrasts: Optional[List[Dict[str, str]]] = None
     contrast_path: Optional[str] = None
 
     # === Execution outputs ===
     abundance_files: Optional[List[str]] = None
     kallisto_index_used: Optional[str] = None
+    kallisto_fastq_dir: Optional[str] = None  # fastq_dir the abundance files came from
     tx2gene_file_used: Optional[str] = None
     sample_mapping_path: Optional[str] = None
     fastq_sample_mapping: Optional[Dict[str, str]] = None  # fastq_prefix -> sample_id

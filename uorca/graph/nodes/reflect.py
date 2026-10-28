@@ -24,6 +24,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+NAMING_RETRY_CHECKPOINTS = ("metadata_analysis", "contrast_design")
+"""Checkpoints that can fix a naming or contrast error. Neither re-runs
+extraction or Kallisto (KallistoQuantifyNode reuses completed output)."""
+
+
+def _guard_naming_retry(retry_from: str, failed_checkpoint: str, state: WorkflowState) -> str:
+    """Keep a retry for a naming or contrast error away from extraction and Kallisto.
+
+    A naming error (``error_type == "naming"`` in the last history entry) is
+    deterministic: re-downloading or re-quantifying cannot fix it, only a new
+    metadata selection or contrast design can (renaming audit 2026-10-28, F23).
+    """
+    last = state.analysis_history[-1] if state.analysis_history else {}
+    if last.get("error_type") != "naming" or retry_from in NAMING_RETRY_CHECKPOINTS:
+        return retry_from
+    target = (
+        failed_checkpoint if failed_checkpoint in NAMING_RETRY_CHECKPOINTS else "contrast_design"
+    )
+    logger.info(
+        "Naming/contrast error: retrying from %r instead of %r (extraction and "
+        "Kallisto cannot fix it)",
+        target,
+        retry_from,
+    )
+    return target
+
+
 @dataclass
 class ReflectNode(BaseNode[WorkflowState, WorkflowDeps, str]):
     """AI-powered failure diagnosis and retry routing."""
@@ -46,9 +73,14 @@ class ReflectNode(BaseNode[WorkflowState, WorkflowDeps, str]):
         ctx.state.reflection_iterations += 1
         if ctx.state.reflection_iterations > ctx.deps.max_retries:
             ctx.state.analysis_success = False
+            last_error = (
+                ctx.state.analysis_history[-1].get("error", "")
+                if ctx.state.analysis_history
+                else ""
+            )
             ctx.state.analysis_diagnostics = (
                 f"Analysis failed after {ctx.deps.max_retries} retry attempts. "
-                f"Last failure: {self.failed_checkpoint}"
+                f"Last failure: {self.failed_checkpoint}: {last_error}"
             )
             return End(
                 f"Analysis failed: max retries exceeded at {self.failed_checkpoint}"
@@ -79,6 +111,10 @@ Dataset: {ctx.state.dataset_id}
 Organism: {ctx.state.organism}
 
 Diagnose the failure and recommend a retry strategy.
+A naming or contrast-design error (invalid contrast name, unknown level token,
+weights that do not form a comparison) is fixed by retrying from
+'contrast_design' (or 'metadata_analysis' for group naming), never by
+re-extracting data or re-running Kallisto.
 """
 
         result = await reflection_agent.run(
@@ -108,9 +144,13 @@ Diagnose the failure and recommend a retry strategy.
 
         # Determine retry point
         retry_from = result.output.retry_from or self.failed_checkpoint
+        retry_from = _guard_naming_retry(retry_from, self.failed_checkpoint, ctx.state)
 
         # Reset failed checkpoint to allow retry
         ctx.state.checkpoints[retry_from] = CheckpointStatus.NOT_STARTED
+        if retry_from == "extraction":
+            # New FASTQs may be downloaded; never reuse the old quantification.
+            ctx.state.checkpoints["kallisto_quant"] = CheckpointStatus.NOT_STARTED
 
         # Route to appropriate node
         return self._get_retry_node(retry_from, ctx.state)
