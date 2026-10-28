@@ -763,55 +763,38 @@ if (!is.null(custom_contrast_matrix)) {
         write_deg_table(top_results, output_dir, contrast_name)
     }
 } else {
-    # Fall back to default behavior
-    if (ncol(design) == 2) {
-        cat("Exactly two groups detected. Calculating contrast (group2 - group1)...\n")
-        contrast_name <- paste(colnames(design)[2], "-", colnames(design)[1])
-        contrast <- makeContrasts(diff = contrast_name, levels = design)
-        cat("Contrast matrix:")
-        print(contrast)
-        vfit <- lmFit(v, design)
-        vfit <- contrasts.fit(vfit, contrast)
-        efit <- eBayes(vfit)
-        dt <- decideTests(efit, p.value = 0.05)
-        save_voom_plot(DGE.norm, efit, design, output_dir)
-        plot_ma(efit, output_dir, coef = 1, status = dt)
-        plot_volcano(efit, output_dir, coef = 1, highlight = 10)
-        plot_deg_heatmap(DGE.norm, efit, output_dir, group_data, coef = 1, n_genes = 50)
-
-        cat("Top differential expression results for contrast:\n")
-        top_results <- topTable(efit, number = Inf)
-        print(head(top_results))
-        top_results$Gene <- rownames(top_results)
-        top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
-        print(head(top_results))
-
-        # Save in contrast-specific directory
-        contrast_name <- colnames(design)[2] + "_vs_" + colnames(design)[1]
-        contrast_dir <- create_contrast_dir(output_dir, contrast_name)
-        write.csv(top_results, file = file.path(contrast_dir, "DEG.csv"), row.names = FALSE)
-    } else {
-        cat("Multiple groups detected. Generating top results for each coefficient...\n")
-        for (i in 1:ncol(design)) {
-            vfit <- lmFit(v, design)
-            efit <- eBayes(vfit)
-            coef_name <- colnames(design)[i]
-            dt <- decideTests(efit, p.value = 0.05)[, i]
-            save_voom_plot(DGE.norm, efit, design, output_dir)
-            plot_ma(efit, output_dir, coef = 1, status = dt)
-            plot_volcano(efit, output_dir, coef = 1, highlight = 10)
-            plot_deg_heatmap(DGE.norm, efit, output_dir, group_data, coef = 1, n_genes = 50)
-            top_results <- topTable(efit, coef = i, number = Inf)
-
-            top_results$Gene <- rownames(top_results)
-            top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
-            print(head(top_results))
-
-            # Save in contrast-specific directory
-            contrast_dir <- create_contrast_dir(output_dir, coef_name)
-            write.csv(top_results, file = file.path(contrast_dir, "DEG.csv"), row.names = FALSE)
-        }
+    # No contrasts file. The UORCA pipeline always writes one; this branch is
+    # for a download bundle of an older run without contrasts. Only a
+    # two-group design has an unambiguous comparison. The former multi-group
+    # branch tested each group mean against zero, which is not a comparison,
+    # so it now stops.
+    if (ncol(design) != 2) {
+        stop("No contrasts file was given and the design has ", ncol(design),
+             " groups (", paste(colnames(design), collapse = ", "), "). ",
+             "Provide a contrasts file with 'name' and 'expression' columns.")
     }
+    contrast_name <- paste0(colnames(design)[2], "_vs_", colnames(design)[1])
+    cat("Exactly two groups and no contrasts file. Contrast:", contrast_name, "\n")
+    contrast <- build_contrast_matrix(
+        contrast_name, paste(colnames(design)[2], "-", colnames(design)[1]),
+        colnames(design), group_name_mapping
+    )
+    check_contrast_folders(output_dir, contrast_name)
+    print(contrast)
+    vfit <- lmFit(v, design)
+    vfit <- contrasts.fit(vfit, contrast)
+    efit <- eBayes(vfit)
+    dt <- decideTests(efit, p.value = 0.05)
+    save_voom_plot(DGE.norm, efit, design, output_dir)
+    plot_ma(efit, output_dir, coef = 1, status = dt)
+    plot_volcano(efit, output_dir, coef = 1, highlight = 10)
+    plot_deg_heatmap(DGE.norm, efit, output_dir, group_data, coef = 1, n_genes = 50)
+
+    top_results <- topTable(efit, number = Inf)
+    top_results$Gene <- rownames(top_results)
+    top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
+    print(head(top_results))
+    write_deg_table(top_results, output_dir, contrast_name)
 }
 
 cat("Step 9: Saving DEG results, normalized DGEList, and CPM values...\n")
