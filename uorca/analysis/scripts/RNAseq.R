@@ -70,8 +70,14 @@ create_contrast_dir <- function(output_dir, contrast_name) {
     return(contrast_dir)
 }
 
+# One row per contrast written; saved as RNAseqAnalysis/contrast_manifest.csv.
+contrast_manifest <- data.frame(contrast_name = character(0), folder = character(0),
+                                n_genes = integer(0), n_samples = integer(0),
+                                stringsAsFactors = FALSE)
+
 # Write DEG.csv for one contrast, refusing to overwrite one from this run.
-write_deg_table <- function(top_results, output_dir, contrast_name) {
+# n_samples: samples in the groups with a non-zero weight in the contrast.
+write_deg_table <- function(top_results, output_dir, contrast_name, n_samples) {
     contrast_dir <- create_contrast_dir(output_dir, contrast_name)
     folder <- basename(contrast_dir)
     if (exists(tolower(folder), envir = written_contrast_folders, inherits = FALSE)) {
@@ -82,7 +88,15 @@ write_deg_table <- function(top_results, output_dir, contrast_name) {
     result_file <- file.path(contrast_dir, "DEG.csv")
     write.csv(top_results, file = result_file, row.names = FALSE)
     cat("Saved results to:", result_file, "\n")
+    contrast_manifest[nrow(contrast_manifest) + 1, ] <<- list(
+        contrast_name, folder, nrow(top_results), as.integer(n_samples)
+    )
     result_file
+}
+
+# Number of samples whose group has a non-zero weight in a contrast column.
+samples_in_contrast <- function(weights, groups) {
+    sum(groups %in% rownames(weights)[weights[, 1] != 0])
 }
 
 # --- Contrast checks ----------------------------------------------------------
@@ -760,7 +774,8 @@ if (!is.null(custom_contrast_matrix)) {
         top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
 
         # Save results in the contrast-specific directory
-        write_deg_table(top_results, output_dir, contrast_name)
+        write_deg_table(top_results, output_dir, contrast_name,
+                        samples_in_contrast(custom_contrast_matrix[, i, drop = FALSE], group_data))
     }
 } else {
     # No contrasts file. The UORCA pipeline always writes one; this branch is
@@ -794,7 +809,8 @@ if (!is.null(custom_contrast_matrix)) {
     top_results$Gene <- rownames(top_results)
     top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
     print(head(top_results))
-    write_deg_table(top_results, output_dir, contrast_name)
+    write_deg_table(top_results, output_dir, contrast_name,
+                    samples_in_contrast(contrast, group_data))
 }
 
 cat("Step 9: Saving DEG results, normalized DGEList, and CPM values...\n")
@@ -803,5 +819,11 @@ saveRDS(DGE.norm, file = file.path(analysis_dir, "DGE_norm.RDS"))
 
 # Export CPM values
 export_cpm(DGE.norm, output_dir)
+
+# Record what was written and with which packages
+manifest_file <- file.path(analysis_dir, "contrast_manifest.csv")
+write.csv(contrast_manifest, file = manifest_file, row.names = FALSE)
+cat("Saved contrast manifest to:", manifest_file, "\n")
+writeLines(capture.output(sessionInfo()), file.path(analysis_dir, "sessionInfo.txt"))
 
 cat("=== R Script: edgeR/limma Analysis Completed ===\n")

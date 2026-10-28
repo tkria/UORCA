@@ -266,3 +266,24 @@ def test_naming_retry_does_not_rerun_kallisto(tmp_path):
 
 def test_non_naming_error_keeps_reflection_choice(tmp_path):
     asyncio.run(_test_non_naming_error_keeps_reflection_choice(tmp_path))
+
+
+def test_contrast_manifest_check(tmp_path):
+    """Python raises when RNAseq.R did not write a requested contrast."""
+    from uorca.analysis.agents.analysis import _check_contrast_manifest
+
+    (tmp_path / "KO_vs_WT").mkdir()
+    (tmp_path / "KO_vs_WT" / "DEG.csv").write_text("Gene\n")
+    pd.DataFrame(
+        {"contrast_name": ["KO_vs_WT"], "folder": ["KO_vs_WT"], "n_genes": [1], "n_samples": [6]}
+    ).to_csv(tmp_path / "contrast_manifest.csv", index=False)
+
+    _check_contrast_manifest(str(tmp_path), ["KO_vs_WT"])
+    with pytest.raises(RuntimeError, match="Missing from the manifest: \\['WT_vs_KO'\\]"):
+        _check_contrast_manifest(str(tmp_path), ["KO_vs_WT", "WT_vs_KO"])
+    (tmp_path / "KO_vs_WT" / "DEG.csv").unlink()
+    with pytest.raises(RuntimeError, match="without DEG.csv"):
+        _check_contrast_manifest(str(tmp_path), ["KO_vs_WT"])
+    (tmp_path / "contrast_manifest.csv").unlink()
+    with pytest.raises(RuntimeError, match="did not write"):
+        _check_contrast_manifest(str(tmp_path), ["KO_vs_WT"])
