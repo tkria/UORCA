@@ -211,8 +211,8 @@ HTTP_CASES = [
     ),
     HttpCase(
         name="google-gla",
-        env={"UORCA_AI_PROVIDER": "google-gla:gemini-2.5-flash", "GEMINI_API_KEY": FAKE_KEY},
-        key_var="GEMINI_API_KEY",
+        env={"UORCA_AI_PROVIDER": "google-gla:gemini-2.5-flash", "GOOGLE_API_KEY": FAKE_KEY},
+        key_var="GOOGLE_API_KEY",
         url="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
         model="gemini-2.5-flash",
         ok=wf.gemini_generate, error=wf.google_error, malformed_error="JSONDecodeError",

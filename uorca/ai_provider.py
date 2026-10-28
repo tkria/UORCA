@@ -99,12 +99,13 @@ GOOGLE_CLOUD_PROJECT = "GOOGLE_CLOUD_PROJECT"
 GOOGLE_CLOUD_LOCATION = "GOOGLE_CLOUD_LOCATION"
 
 # Hosted providers selected by a "<provider>:<model>" string, and the environment
-# variables that hold their key. The first name is the one pydantic-ai documents; any
-# further names are accepted alternatives the SDK also reads.
+# variables that hold their key, in the order the installed code reads them. For
+# google-gla, pydantic-ai 0.4.2 (providers/google.py) and google-genai 1.25.0
+# (_api_client.py) both use GOOGLE_API_KEY first and GEMINI_API_KEY second.
 API_KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
     "openai": ("OPENAI_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY",),
-    "google-gla": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "google-gla": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "groq": ("GROQ_API_KEY",),
     "mistral": ("MISTRAL_API_KEY",),
     "cohere": ("CO_API_KEY",),
@@ -397,6 +398,19 @@ def resolve_model_spec(config: dict[str, Any] | None = None) -> ModelSpec:
 # Credential check
 # ---------------------------------------------------------------------------
 
+def redact_url(url: str | None) -> str:
+    """*url* with any ``user:password@`` replaced by ``***@``, for messages and logs."""
+    if not url:
+        return ""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit(parts._replace(netloc=f"***@{host}"))
+
+
 def _first_set(names: tuple[str, ...]) -> str | None:
     for name in names:
         if os.environ.get(name):
@@ -484,7 +498,7 @@ def check_provider_credentials(spec: ModelSpec | None = None) -> ModelSpec:
     elif spec.provider == "openai_compatible":
         if spec.api_key_env and not os.environ.get(spec.api_key_env):
             raise MissingCredentialsError(
-                f"The OpenAI-compatible server at {spec.base_url} is configured to use the "
+                f"The OpenAI-compatible server at {redact_url(spec.base_url)} is configured to use the "
                 f"key in {spec.api_key_env}, but {spec.api_key_env} is not set."
             )
     elif spec.provider == "bedrock":

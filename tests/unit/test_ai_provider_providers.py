@@ -138,7 +138,7 @@ def test_openai_compatible_requires_base_url(monkeypatch):
     [
         ("openai", "OPENAI_API_KEY"),
         ("anthropic:claude-x", "ANTHROPIC_API_KEY"),
-        ("google-gla:gemini-x", "GEMINI_API_KEY"),
+        ("google-gla:gemini-x", "GOOGLE_API_KEY"),
         ("groq:llama-x", "GROQ_API_KEY"),
         ("mistral:mistral-x", "MISTRAL_API_KEY"),
         ("cohere:command-x", "CO_API_KEY"),
@@ -152,10 +152,38 @@ def test_missing_key_names_the_variable(monkeypatch, value, key_var):
     assert ai_provider.check_provider_credentials().provider == value.split(":")[0]
 
 
-def test_gemini_accepts_google_api_key_too(monkeypatch):
+def test_gemini_accepts_gemini_api_key_too(monkeypatch):
     monkeypatch.setenv("UORCA_AI_PROVIDER", "google-gla:gemini-x")
-    monkeypatch.setenv("GOOGLE_API_KEY", "fake")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
     ai_provider.check_provider_credentials()
+
+
+def test_gemini_key_order_matches_installed_sdk():
+    # pydantic-ai 0.4.2 and google-genai 1.25.0 both read GOOGLE_API_KEY first.
+    assert ai_provider.API_KEY_ENV_VARS["google-gla"] == ("GOOGLE_API_KEY", "GEMINI_API_KEY")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://user:s3cret@llm.example.org/v1", "https://***@llm.example.org/v1"),
+        ("https://token@llm.example.org:8443/v1", "https://***@llm.example.org:8443/v1"),
+        ("http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1"),
+    ],
+)
+def test_redact_url(url, expected):
+    assert ai_provider.redact_url(url) == expected
+
+
+def test_key_error_does_not_leak_url_credentials(monkeypatch):
+    monkeypatch.setenv("UORCA_AI_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("UORCA_OPENAI_COMPATIBLE_BASE_URL", "https://bob:s3cret@llm.example.org/v1")
+    monkeypatch.setenv("UORCA_OPENAI_COMPATIBLE_MODEL", "m")
+    monkeypatch.setenv("UORCA_OPENAI_COMPATIBLE_API_KEY_ENV", "OLLAMA_KEY")
+    with pytest.raises(MissingCredentialsError) as excinfo:
+        ai_provider.check_provider_credentials()
+    assert "s3cret" not in str(excinfo.value)
+    assert "https://***@llm.example.org/v1" in str(excinfo.value)
 
 
 def test_get_model_checks_credentials_for_new_providers(monkeypatch):
