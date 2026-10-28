@@ -163,3 +163,58 @@ def test_build_readme_text_mentions_formats():
 
     assert 'PDF' in readme
     assert 'PNG' in readme or 'SVG' in readme
+
+def test_build_repro_script_sizes_margins_for_wrapped_labels():
+    """The script uses automargin and a bottom margin computed from <br>-wrapped labels, like the app."""
+    script = build_repro_script()
+
+    assert "split('<br>')" in script
+    assert "b=bottom_margin" in script
+    assert "b=120" not in script
+    assert "automargin=True" in script
+    assert "fig.update_yaxes(automargin=True)" in script
+    compile(script, "reproduce_heatmap.py", "exec")
+
+
+@pytest.mark.unit
+def test_repro_script_renders_wrapped_labels(tmp_path, monkeypatch):
+    """Run the generated script on app-style wrapped labels; the layout gets automargin and a larger margin."""
+    import json
+    import runpy
+    import sys
+
+    import pandas as pd
+    import plotly.graph_objects as go
+
+    from uorca.gui.results_integration import build_contrast_labels
+
+    names = ["PPARG_KD1_DLX6_overexpression_vs_control", "PPARG_KD1_vs_control_TSC_self_renewal",
+             "EVT_DMOG_vs_control"]
+    labels = build_contrast_labels([(None, n) for n in names])
+    cols = [f"GSE1_{n}" for n in names]
+    pd.DataFrame({"Gene": ["A", "B"], cols[0]: [1.5, -2.0], cols[1]: [0.0, 3.0], cols[2]: [2.2, 0.0]}).to_csv(
+        tmp_path / "heatmap_data.csv", index=False)
+    (tmp_path / "metadata.json").write_text(json.dumps({
+        "output_format": "png",
+        "x_axis_labels": {c: lab.display for c, lab in zip(cols, labels)},
+        "clustered_contrasts": cols,
+    }))
+    script = tmp_path / "reproduce_heatmap.py"
+    script.write_text(build_repro_script())
+
+    captured = {}
+
+    def fake_write_image(self, path, *args, **kwargs):
+        captured["fig"] = self
+        captured["path"] = path
+
+    monkeypatch.setattr(go.Figure, "write_image", fake_write_image)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reproduce_heatmap.py"])
+    runpy.run_path(str(script), run_name="__main__")
+
+    fig = captured["fig"]
+    assert list(fig.layout.xaxis.ticktext) == [lab.display for lab in labels]
+    assert fig.layout.xaxis.automargin is True
+    assert fig.layout.yaxis.automargin is True
+    assert fig.layout.margin.b > 120
