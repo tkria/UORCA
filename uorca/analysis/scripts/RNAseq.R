@@ -409,24 +409,46 @@ if (!"abundance_file" %in% colnames(metadata)) {
     stop("Metadata must contain an 'abundance_file' column!")
 }
 
-# Sanitize group column values to be valid R names (handles /, spaces, etc.)
-# Store mapping for contrast expression translation
-if (merged_group %in% colnames(metadata)) {
-    original_groups <- unique(metadata[[merged_group]])
-    sanitized_groups <- make.names(original_groups)
-    group_name_mapping <- setNames(sanitized_groups, original_groups)
-
-    # Apply sanitization to the grouping column
-    metadata[[merged_group]] <- make.names(metadata[[merged_group]])
-
-    cat("Sanitized group names for R compatibility:\n")
+# Group levels must reach the design matrix as valid, distinct R names.
+# The UORCA pipeline writes such names (column uorca_group), so nothing is
+# renamed. Older inputs (for example a download bundle of an earlier run) carry
+# raw levels; those are renamed with make.names, but only when no two levels
+# get the same name, which would silently merge two groups.
+if (!merged_group %in% colnames(metadata)) {
+    stop("Group column '", merged_group, "' is not in the sample table. Columns: ",
+         paste(colnames(metadata), collapse = ", "))
+}
+raw_groups <- as.character(metadata[[merged_group]])
+bad_rows <- which(is.na(raw_groups) | raw_groups == "")
+if (length(bad_rows) > 0) {
+    stop("Group column '", merged_group, "' is empty in ", length(bad_rows),
+         " sample(s) (rows ", paste(head(bad_rows, 10), collapse = ", "),
+         "). Every sample needs a group.")
+}
+original_groups <- unique(raw_groups)
+sanitized_groups <- make.names(original_groups)
+collided <- sanitized_groups[duplicated(sanitized_groups)]
+if (length(collided) > 0) {
+    clashes <- vapply(unique(collided), function(r) {
+        paste0("'", r, "' <- ",
+               paste0("'", original_groups[sanitized_groups == r], "'", collapse = " and "))
+    }, character(1))
+    stop("Different group levels get the same R name, so they would be merged ",
+         "into one group: ", paste(clashes, collapse = "; "),
+         ". Give each level a distinct valid R name (the UORCA pipeline writes ",
+         "them to the uorca_group column).")
+}
+group_name_mapping <- setNames(sanitized_groups, original_groups)
+if (identical(sanitized_groups, original_groups)) {
+    cat("Group levels are valid R names; nothing renamed.\n")
+} else {
+    cat("Legacy input: renaming group levels with make.names:\n")
     for (i in seq_along(original_groups)) {
         if (original_groups[i] != sanitized_groups[i]) {
             cat("  ", original_groups[i], " -> ", sanitized_groups[i], "\n")
         }
     }
-} else {
-    group_name_mapping <- NULL
+    metadata[[merged_group]] <- unname(group_name_mapping[raw_groups])
 }
 
 # Load tx2gene mapping if provided
@@ -474,11 +496,12 @@ DGE$samples$group <- NULL
 DGE$samples <- cbind(DGE$samples, metadata)
 
 
-group_data <- DGE$samples[[merged_group]]
-
-# Sanitize group names to valid R names (handles SARS-CoV-2 -> SARS.CoV.2, etc.)
-group_data <- make.names(group_data)
-DGE$samples[[merged_group]] <- group_data
+group_data <- as.character(DGE$samples[[merged_group]])
+# The levels were checked (and, for legacy input, renamed) above.
+if (!identical(make.names(group_data), group_data)) {
+    stop("Internal error: group levels are not valid R names after the check: ",
+         paste(unique(group_data[make.names(group_data) != group_data]), collapse = ", "))
+}
 
 # Filter genes with low expression
 keep.exprs <- filterByExpr(DGE, group = group_data)
