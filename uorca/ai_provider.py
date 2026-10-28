@@ -125,7 +125,16 @@ class ProviderConfigError(ValueError):
 
 
 class MissingCredentialsError(ProviderConfigError):
-    """The selected AI provider has no key or credentials in the environment."""
+    """The selected AI provider has no key or credentials in the environment.
+
+    Attributes:
+        env_vars: The variable(s) to set, when a single key variable fixes it; empty
+            when the fix is a login or a credentials file (Bedrock, Vertex AI).
+    """
+
+    def __init__(self, message: str, env_vars: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.env_vars = tuple(env_vars)
 
 
 @dataclass(frozen=True)
@@ -487,19 +496,22 @@ def check_provider_credentials(spec: ModelSpec | None = None) -> ModelSpec:
             alternatives = " or ".join(names)
             raise MissingCredentialsError(
                 f"The AI provider is {spec.display_name!r}, but {alternatives} is not set. "
-                f"Add it to your .env file or export it, and try again."
+                f"Add it to your .env file or export it, and try again.",
+                env_vars=names[:1],
             )
     elif spec.provider == "azure":
         if not os.environ.get(AZURE_OPENAI_API_KEY):
             raise MissingCredentialsError(
                 f"The AI provider is Azure OpenAI, but {AZURE_OPENAI_API_KEY} is not set. "
-                f"Add it to your .env file or export it, and try again."
+                f"Add it to your .env file or export it, and try again.",
+                env_vars=(AZURE_OPENAI_API_KEY,),
             )
     elif spec.provider == "openai_compatible":
         if spec.api_key_env and not os.environ.get(spec.api_key_env):
             raise MissingCredentialsError(
                 f"The OpenAI-compatible server at {redact_url(spec.base_url)} is configured to use the "
-                f"key in {spec.api_key_env}, but {spec.api_key_env} is not set."
+                f"key in {spec.api_key_env}, but {spec.api_key_env} is not set.",
+                env_vars=(spec.api_key_env,),
             )
     elif spec.provider == "bedrock":
         _check_bedrock_credentials(spec)

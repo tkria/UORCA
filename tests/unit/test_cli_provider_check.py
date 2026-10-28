@@ -94,10 +94,49 @@ def test_run_with_bedrock_checks_aws_credentials(monkeypatch, capsys):
     cli._check_environment_requirements(require_ai="run")
 
 
-def test_invalid_provider_setting_is_reported(monkeypatch, capsys):
-    monkeypatch.setenv("UORCA_AI_PROVIDER", "typo")
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"UORCA_AI_PROVIDER": "typo"}, "Unknown AI provider 'typo'"),
+        ({"UORCA_AI_PROVIDER": "azure"}, "Azure OpenAI deployment name"),
+    ],
+)
+def test_invalid_provider_setting_is_reported_as_a_setting(monkeypatch, capsys, env, expected):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setenv("OPENAI_API_KEY", "fake")
-    assert "Unknown AI provider 'typo'" in _exits(capsys, require_ai="identify")
+    out = _exits(capsys, require_ai="identify")
+    assert expected in out
+    assert "The AI provider setting is invalid" in out
+    assert "UORCA_AI_PROVIDER is set to" in out and "config file" in out
+    # Not the missing-key banner, which would point at .env with no key to add.
+    assert "Missing essential API credentials" not in out
+    assert "Where to get API keys" not in out
+
+
+def test_invalid_setting_in_config_file_names_the_file(tmp_path, capsys, monkeypatch):
+    (tmp_path / "config.yaml").write_text("ai_provider:\n  provider: typo\n")
+    ai_provider._load_ai_config.cache_clear()
+    monkeypatch.setenv("OPENAI_API_KEY", "fake")
+    out = _exits(capsys, require_ai="run")
+    assert f"ai_provider.provider in {tmp_path / 'config.yaml'}" in out
+
+
+@pytest.mark.parametrize(
+    ("setting", "var", "url"),
+    [
+        ("anthropic:claude-x", "ANTHROPIC_API_KEY", "https://console.anthropic.com/settings/keys"),
+        ("google-gla:gemini-x", "GOOGLE_API_KEY", "https://aistudio.google.com/apikey"),
+        ("groq:llama-x", "GROQ_API_KEY", "https://console.groq.com/keys"),
+    ],
+)
+def test_missing_key_banner_lists_the_provider_key_and_url(monkeypatch, capsys, setting, var, url):
+    monkeypatch.setenv("UORCA_AI_PROVIDER", setting)
+    out = _exits(capsys, require_ai="identify")
+    assert "Missing essential API credentials" in out
+    assert f"{var}=<your-key>" in out
+    assert url in out
+    assert "platform.openai.com" not in out
 
 
 def test_no_ai_step_needs_no_ai_key(capsys):
