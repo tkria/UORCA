@@ -216,14 +216,14 @@ Current limits when the provider is not OpenAI:
 
 `uorca run` checks the selected provider's key on your machine first and stops if it is missing. It then
 gives each pipeline container the provider setting (provider, model, region, endpoint, base URL) by value,
-so the container resolves the same model as your machine without reading `~/.uorca/config.yaml`. Keys are
-passed **by variable name only**. No key value is written to an sbatch script, a job folder, a log or a
-result file, or put on a command line that `ps` can show.
+so the container resolves the same model as your machine. Keys are passed **by variable name only**. No key
+value is written to an sbatch script, a job folder, a log or a result file, or put on a command line that
+`ps` can show.
 
 | Backend | How a key reaches the container |
 |---|---|
-| `uorca run local` (Docker) | `docker run -e NAME` without a value. Docker copies the value from the environment of the `docker` process, which inherits UORCA's environment (including `.env`). |
-| `uorca run slurm`, Apptainer | `sbatch --export=ALL` copies the submitting shell's environment into the job. The script then runs `export APPTAINERENV_NAME="${NAME}"` for each key that is set; `APPTAINERENV_` variables pass `--cleanenv`. |
+| `uorca run local` (Docker) | `docker run -e NAME` without a value. Docker copies the value from the environment of the `docker` process, which inherits UORCA's environment (including `.env`). Only the variables named with `-e` enter the container. |
+| `uorca run slurm`, Apptainer | `sbatch --export=ALL` copies the submitting shell's environment into the job. The script then runs `export APPTAINERENV_NAME="${NAME}"` for each key that is set. `--cleanenv` keeps every other variable out of the container; `APPTAINERENV_` variables are the exception. |
 | `uorca run slurm`, Docker engine | As for SLURM, then `docker run -e NAME` inside the job. |
 
 Variables passed by name: `ENTREZ_EMAIL` and `ENTREZ_API_KEY`, plus the selected provider's key variables
@@ -231,23 +231,44 @@ from the table above (for Gemini both `GOOGLE_API_KEY` and `GEMINI_API_KEY`; for
 server, the variable named by `UORCA_OPENAI_COMPATIBLE_API_KEY_ENV`). Another provider's key, such as
 `OPENAI_API_KEY` when Anthropic is selected, is not passed.
 
+**What the SLURM job holds.** `--export=ALL` passes your whole submitting environment into the job,
+including every key in it. Slurm stores the job environment in its state on the controller, and in its
+accounting database too if the site stores the job environment there (`AccountingStoreFlags=job_env`).
+Inside the job, `--cleanenv` (Apptainer) and `-e NAME` (Docker) keep everything except the named variables
+out of the container. Submit from a shell that holds only the keys you need.
+
+**The repository `.env`.** The repository is mounted into each container, and the pipeline loads `.env`
+files, so a repository `.env` would give every key in it to every job. Each backend mounts an empty
+read-only file over the repository's `.env` inside the container.
+
+**What Apptainer sees from your home directory.** Apptainer mounts `$HOME` by default, so a job can read
+`~/.uorca/config.yaml` (the settings passed by value override it), `~/.aws`, and your shell login files. The
+job runs under `bash -lc`, which reads those login files, so an `export` there also reaches the job. Docker
+does not mount your home directory.
+
 **AWS Bedrock.** The AWS variables `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `AWS_SESSION_TOKEN`, `AWS_REGION` and `AWS_DEFAULT_REGION` are passed by name, and `~/.aws` is mounted
 read-only (at `/root/.aws` for Docker, at the same path for Apptainer), so profiles and AWS SSO tokens work.
-Run `aws sso login` before you submit. The SSO token must still be valid when each job **starts and while it
-runs**, because the read-only mount means a job cannot refresh it. On a busy SLURM queue, a job can start after a short session has expired, and it then fails with an
-AWS credentials error.
+Run `aws sso login` before you submit. The SSO token must be valid when each job **starts**, and it must
+stay valid **while the job runs**, because the read-only mount means a job cannot refresh it. A job that
+waits in a busy queue can start after a short session has expired, and a long job can outlive the token;
+either fails with an AWS credentials error. `uorca run` stops on your machine for an AWS setup a container
+cannot use: `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE` pointing outside `~/.aws`, or a profile that
+uses `credential_process`.
 
-Other notes:
+**Stopped before submission.** These pass on your machine but cannot work in a container, so `uorca run`
+stops with a message:
 
-- An OpenAI-compatible server at `localhost` on your machine is not `localhost` inside a Docker container.
-  Use `http://host.docker.internal:<port>/v1` (Docker Desktop), or a host name the compute nodes can reach.
-  A base URL that contains `user:password@` is refused for `uorca run`; put the key in the variable named
-  by `UORCA_OPENAI_COMPATIBLE_API_KEY_ENV`.
-- Google Vertex AI: `GOOGLE_APPLICATION_CREDENTIALS` is passed by name, but the file it points to must be
-  inside a directory the container can see. This is not mounted for you.
-- The real Docker and SLURM paths have not been run with a provider other than OpenAI. Unit tests check the
-  generated commands and scripts.
+- An OpenAI-compatible server at `localhost`, `127.0.0.1` or `::1`. Inside a container, that address is the
+  container itself. Use `http://host.docker.internal:<port>/v1` for `uorca run local` (Docker Desktop), or a
+  host name the compute nodes can reach for `uorca run slurm`.
+- A base URL or Azure endpoint with `user:password@`, a query string (`?api-key=...`) or a fragment. It is
+  passed by value, so it must hold no secret; put the key in the key variable.
+- Google Vertex AI. Its credentials file and the gcloud login are not mounted into the containers. Use it for
+  `uorca identify` only.
+
+The real Docker and SLURM paths have not been run with a provider other than OpenAI. Unit tests check the
+generated commands and scripts.
 
 Only OpenAI and Bedrock have had real calls. The other providers are covered by contract tests
 (`tests/contract/`), which use fake keys and stored responses. These tests check that UORCA builds the right
