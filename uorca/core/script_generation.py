@@ -118,14 +118,11 @@ def build_repro_script() -> str:
         '    dynamic_height = int(140 + df.shape[0] * row_height)',
         '    height_px = max(650, min(4500, dynamic_height))',
         '    left_margin = max(80, min(520, int(40 + max_gene_label_len * font_size * 0.7)))',
-        '    # Contrast labels may span several lines joined by <br> (as in the app).',
-        '    # Size the bottom margin for the longest label line; automargin (below)',
-        '    # grows it further if Plotly needs more.',
-        "    label_lines = [str(lab).split('<br>') for lab in simplified_cols] or [['']]",
-        '    max_line_chars = max(len(line) for lines in label_lines for line in lines)',
-        '    # Labels are vertical (tickangle -90): height = longest line, as in the app',
-        '    bottom_margin = max(120, int(40 + max_line_chars * font_size * 0.65))',
-        '    width_px = max(700, min(1700, df.shape[1] * 90))',
+        '    # One-line contrast labels at -45 degrees, as in the app. Size the bottom',
+        '    # margin for the longest label; automargin (below) grows it if needed.',
+        '    max_label_chars = max((len(str(lab)) for lab in simplified_cols), default=10)',
+        '    bottom_margin = int(40 + max_label_chars * font_size * 0.6 * 0.71)',
+        '    width_px = max(700, left_margin + df.shape[1] * 28 + 160)  # same minimum column width as the app',
         '',
         '    # Significance subtitle, as in the app',
         "    title_text = 'Differential Expression Heatmap (Log2 Fold Change)'",
@@ -158,7 +155,19 @@ def build_repro_script() -> str:
         '',
         '    # Update x-axis tick labels with simplified names, respecting clustered order',
         '    tick_vals = list(range(len(simplified_cols)))',
-        '    fig.update_xaxes(tickmode="array", tickvals=tick_vals, ticktext=simplified_cols, tickangle=-90, title=dict(text="Biological contrast", standoff=20), automargin=True)',
+        '    fig.update_xaxes(tickmode="array", tickvals=tick_vals, ticktext=simplified_cols, tickangle=-45, title=dict(text="Biological contrast", standoff=12), automargin=True)',
+        '    # Dataset accession once above each block of columns (see column_key.csv)',
+        "    blocks = meta.get('dataset_blocks') or []",
+        '    if len(blocks) > 1:',
+        '        for acc, start, end in blocks:',
+        "            fig.add_annotation(x=(start + end) / 2, y=1.0, xref='x', yref='paper', text=f'<b>{acc}</b>',",
+        "                               showarrow=False, yanchor='bottom', yshift=4, font=dict(size=font_size))",
+        "            fig.add_shape(type='line', xref='x', yref='paper', x0=start - 0.45, x1=end + 0.45, y0=1.0, y1=1.0,",
+        "                          line=dict(color='#555', width=1.5))",
+        '        for _, start, _ in blocks[1:]:',
+        "            fig.add_shape(type='line', xref='x', yref='paper', x0=start - 0.5, x1=start - 0.5, y0=0, y1=1,",
+        "                          line=dict(color='#333', width=1.5))",
+        '        fig.update_layout(margin=dict(t=110))',
         '    fig.update_yaxes(automargin=True)',
         '',
         '    # Grid lines',
@@ -213,7 +222,8 @@ def build_readme_text() -> str:
         "--------------------------------\n\n"
         "Included files:\n"
         "- heatmap_data.csv: CSV table of genes (rows) and contrasts (columns) containing log2 fold change values (non-significant values set to 0).\n"
-        "- metadata.json: JSON metadata including thresholds, clustered contrast order, and default x-axis label mapping.\n"
+        "- metadata.json: JSON metadata including thresholds, clustered contrast order, default x-axis label mapping and dataset blocks.\n"
+        "- column_key.csv: One row per heatmap column, left to right: number, label on the chart, dataset, full contrast name, description.\n"
         "- reproduce_heatmap.py: Script to generate the same heatmap as in the app.\n"
         "- README.txt: This file.\n\n"
         "Quick start (recommended):\n"

@@ -69,17 +69,25 @@ logger.setLevel(logging.WARNING)
 # Heatmap contrast labels
 # ---------------------------------------------------------------------------
 
-LABEL_LINE_CHARS = 30  # vertical tick labels: height is cheap, width is not
-LABEL_MAX_LINES = 2   # plus one accession line when several datasets are shown
+SHORT_LABEL_CHARS = 25   # one-line, angled heatmap tick labels
+HEATMAP_TICK_ANGLE = -45
 ELLIPSIS = "…"
 HOVER_WRAP_CHARS = 80
-HEATMAP_MIN_COL_PX = 48
+HEATMAP_MIN_COL_PX = 28  # measured in the live app: 25-character labels at -45 deg do not overlap
 FORMULA_MAX_CHARS = 300
+GROUP_LINE_CHARS = 24
+GROUP_MAX_LINES = 3
 
 
 @dataclass(frozen=True)
 class ContrastLabel:
-    """A contrast's full name (hover) and its wrapped axis label (display)."""
+    """One heatmap column.
+
+    ``accession`` is the dataset, ``full`` the full contrast name (plain text,
+    for hover and the key table) and ``display`` the short, unique,
+    HTML-escaped tick label.
+    """
+    accession: str
     full: str
     display: str
 
@@ -90,8 +98,8 @@ def _split_label_tokens(text: str) -> List[str]:
 
 
 def wrap_contrast_label(text: str,
-                        line_chars: int = LABEL_LINE_CHARS,
-                        max_lines: int = LABEL_MAX_LINES) -> str:
+                        line_chars: int = GROUP_LINE_CHARS,
+                        max_lines: int = GROUP_MAX_LINES) -> str:
     """Wrap a contrast name onto at most ``max_lines`` lines joined by ``<br>``.
 
     Lines break after '_' or ' '. A token longer than a line is split. No
@@ -123,46 +131,68 @@ def wrap_contrast_label(text: str,
     return "<br>".join(html.escape(line, quote=False) for line in lines)
 
 
-def build_contrast_labels(contrasts: Sequence[Tuple[Optional[str], str]]) -> List[ContrastLabel]:
-    """Build full and display labels for heatmap columns.
+def _shared_leading_words(names: Sequence[str]) -> str:
+    """Leading '_'-separated words that every name shares, e.g. "PPARG_" for
+    "PPARG_KD1_vs_control" and "PPARG_rescue_vs_dox". Empty when fewer than two
+    distinct names, or when dropping the words would leave a name empty."""
+    distinct = list(dict.fromkeys(names))
+    if len(distinct) < 2:
+        return ""
+    token_lists = [_split_label_tokens(n) for n in distinct]
+    shared: List[str] = []
+    for tokens in zip(*token_lists):
+        if all(t == tokens[0] for t in tokens) and tokens[0].endswith(("_", " ")):
+            shared.append(tokens[0])
+        else:
+            break
+    prefix = "".join(shared)
+    if any(len(n) <= len(prefix) for n in distinct):
+        return ""
+    return prefix
+
+
+def shorten_label(text: str, max_chars: int = SHORT_LABEL_CHARS) -> str:
+    """Cut ``text`` to one line of at most ``max_chars`` characters, ending in "…" if cut."""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - len(ELLIPSIS)].rstrip("_ ") + ELLIPSIS
+
+
+def build_contrast_labels(contrasts: Sequence[Tuple[Optional[str], str]],
+                          max_chars: int = SHORT_LABEL_CHARS) -> List[ContrastLabel]:
+    """Short, unique, one-line tick labels for heatmap columns.
 
     Args:
         contrasts: ``(accession, contrast_name)`` pairs in column order.
-            ``accession`` may be None.
 
-    When the columns span more than one dataset, the accession goes on its own
-    first line of the display label, so it takes no characters from the
-    contrast name's three lines; the full name is "ACCESSION: name".
-
-    Display labels are unique: a label already used gets the lowest free
-    " (n)" suffix, checked against every label, so ["a (2)", "a", "a"] gives
-    "a (2)", "a", "a (3)".
-
-    ``full`` is plain text; ``display`` is HTML-escaped Plotly tick text.
+    The accession is not part of the label: the heatmap shows it once above
+    each dataset's block of columns. Within a dataset, the leading words that
+    all of its contrast names share are dropped, then the rest is cut to
+    ``max_chars`` with an ellipsis. A label already used in the plot gets the
+    lowest free " (n)" suffix. ``display`` is HTML-escaped; ``full`` keeps the
+    whole name for the hover and the key table.
     """
-    accessions = {acc for acc, _ in contrasts if acc}
-    prefix = len(accessions) > 1
+    by_acc: Dict[str, List[str]] = {}
+    for acc, name in contrasts:
+        by_acc.setdefault(str(acc or ""), []).append(name)
+    prefixes = {acc: _shared_leading_words(names) for acc, names in by_acc.items()}
+
     labels: List[ContrastLabel] = []
     used: Set[str] = set()
     for acc, name in contrasts:
-        if prefix and acc:
-            full = f"{acc}: {name}"
-            display = html.escape(acc, quote=False) + "<br>" + wrap_contrast_label(name)
-        else:
-            full = name
-            display = wrap_contrast_label(name)
-        candidate = display
+        acc_key = str(acc or "")
+        prefix = prefixes[acc_key]
+        short = shorten_label(name[len(prefix):] if prefix else name, max_chars)
+        candidate = short
         n = 2
         while candidate in used:
-            candidate = f"{display} ({n})"
+            suffix = f" ({n})"
+            candidate = shorten_label(short, max_chars - len(suffix)) + suffix
             n += 1
         used.add(candidate)
-        labels.append(ContrastLabel(full=full, display=candidate))
+        labels.append(ContrastLabel(accession=acc_key, full=name,
+                                    display=html.escape(candidate, quote=False)))
     return labels
-
-
-GROUP_LINE_CHARS = 24
-GROUP_MAX_LINES = 3
 
 
 def _common_label_prefix(names: Sequence[str]) -> str:
@@ -214,6 +244,17 @@ def build_group_labels(groups: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, str
         used.add(candidate)
         labels[(acc, grp)] = candidate
     return labels
+
+
+def _accession_blocks(column_accessions: Sequence[str]) -> List[Tuple[str, int, int]]:
+    """Runs of equal accessions as (accession, first index, last index)."""
+    blocks: List[Tuple[str, int, int]] = []
+    for i, acc in enumerate(column_accessions):
+        if blocks and blocks[-1][0] == acc and blocks[-1][2] == i - 1:
+            blocks[-1] = (acc, blocks[-1][1], i)
+        else:
+            blocks.append((acc, i, i))
+    return blocks
 
 
 def wrap_hover_text(text: str, width: int = HOVER_WRAP_CHARS,
@@ -964,23 +1005,36 @@ class ResultsIntegrator:
             else:
                 clustered_genes = heatmap_df.index.tolist()
 
-        # 2. Cluster contrasts (columns)
-        if len(heatmap_df.columns) > 1:  # Only cluster if we have multiple contrasts
+        # 2. Cluster contrasts (columns). With several datasets, each dataset
+        # keeps one contiguous block of columns (clustered within the block),
+        # so its accession can be shown once above the block.
+        label_to_accession = {
+            f"{a_id}_{c_id}": self.analysis_info.get(a_id, {}).get('accession', a_id)
+            for a_id, c_id in contrasts
+        }
+
+        def _cluster_columns(columns: List[str]) -> List[str]:
+            if len(columns) < 2:
+                return list(columns)
+            block = heatmap_df.loc[:, columns].to_numpy(dtype=float)
+            if not (block != 0).any():
+                logger.warning("Skipping contrast clustering due to lack of non-zero values")
+                return list(columns)
             try:
-                # Only cluster if we have non-zero values
-                if non_zero_count > 0:
-                    contrast_linkage = sch.linkage(pdist(heatmap_df.values.T), method='complete')
-                    contrast_order = sch.leaves_list(contrast_linkage)
-                    clustered_contrasts = [heatmap_df.columns[i] for i in contrast_order]
-                else:
-                    # Skip clustering if all values are zero
-                    logger.warning("Skipping contrast clustering due to lack of non-zero values")
-                    clustered_contrasts = heatmap_df.columns.tolist()
-            except Exception as e:
-                logger.warning(f"Error clustering contrasts: {str(e)}. Using original order.")
-                clustered_contrasts = heatmap_df.columns.tolist()
+                order = sch.leaves_list(sch.linkage(pdist(block.T), method='complete'))
+            except ValueError as e:
+                logger.warning(f"Error clustering contrasts: {e}. Using original order.")
+                return list(columns)
+            return [columns[i] for i in order]
+
+        block_accessions = list(dict.fromkeys(label_to_accession[c] for c in heatmap_df.columns))
+        if len(block_accessions) > 1:
+            clustered_contrasts = []
+            for acc in block_accessions:
+                clustered_contrasts.extend(_cluster_columns(
+                    [c for c in heatmap_df.columns if label_to_accession[c] == acc]))
         else:
-            clustered_contrasts = heatmap_df.columns.tolist()
+            clustered_contrasts = _cluster_columns(heatmap_df.columns.tolist())
 
         # Reorder the DataFrame according to clustering
         heatmap_df = heatmap_df.loc[clustered_genes, clustered_contrasts]
@@ -998,6 +1052,7 @@ class ResultsIntegrator:
                 'simplified_labels': simplified_labels,
                 'full_labels': full_labels,
                 'contrast_labels': contrast_labels,
+                'column_accessions': [label_to_accession[c] for c in clustered_contrasts],
                 'p_value_threshold': p_thresh,
                 'lfc_threshold': lfc_thresh,
             }
@@ -1025,6 +1080,8 @@ class ResultsIntegrator:
         # Left margin scales with gene label length and font size; automargin
         # (set below) grows it further if the tick labels need more room.
         left_margin = max(80, min(520, int(40 + max_gene_label_len * font_size * 0.7)))
+        # Bottom margin for one-line labels at HEATMAP_TICK_ANGLE (automargin can grow it)
+        bottom_margin = int(40 + SHORT_LABEL_CHARS * font_size * 0.6 * abs(math.sin(math.radians(HEATMAP_TICK_ANGLE))))
 
         # Create the heatmap
         fig = px.imshow(
@@ -1048,7 +1105,7 @@ class ResultsIntegrator:
 
         # Improve layout
         fig.update_layout(
-            margin=dict(l=left_margin, r=20, t=80, b=120),
+            margin=dict(l=left_margin, r=20, t=80, b=bottom_margin),
             coloraxis_colorbar=dict(title="Log2FC"),
             font_family="Inter, sans-serif",
             font_size=font_size
@@ -1150,11 +1207,51 @@ class ResultsIntegrator:
                 tickmode="array",
                 tickvals=tick_vals,
                 ticktext=clustered_simplified_labels,
-                # Vertical labels: each wrapped line becomes a narrow column,
-                # so neighbouring multi-line labels do not overlap
-                tickangle=-90,
-                title=dict(text="Biological contrast", standoff=20)
+                # Short one-line labels at an angle: about 28 px per column is
+                # enough for neighbours not to overlap
+                tickangle=HEATMAP_TICK_ANGLE,
+                title=dict(text="Biological contrast", standoff=12)
             )
+
+            # Dataset accession once per block of columns, with separators
+            column_accessions = [label_to_accession[c] for c in clustered_contrasts]
+            blocks = _accession_blocks(column_accessions)
+            if len(blocks) > 1:
+                for acc, start, end in blocks:
+                    fig.add_annotation(
+                        x=(start + end) / 2, y=1.0, xref="x", yref="paper",
+                        text=f"<b>{html.escape(acc, quote=False)}</b>",
+                        showarrow=False, yanchor="bottom", yshift=4,
+                        font=dict(size=font_size),
+                    )
+                    fig.add_shape(type="line", xref="x", yref="paper",
+                                  x0=start - 0.45, x1=end + 0.45, y0=1.0, y1=1.0,
+                                  line=dict(color="#555", width=1.5))
+                for _, start, _ in blocks[1:]:
+                    fig.add_shape(type="line", xref="x", yref="paper",
+                                  x0=start - 0.5, x1=start - 0.5, y0=0, y1=1,
+                                  line=dict(color="#333", width=1.5))
+                fig.update_layout(margin=dict(t=110))
+
+            # Numbered key: one row per column, for the table under the chart,
+            # its CSV download and the reproduction package
+            label_to_pair = {f"{a_id}_{c_id}": (a_id, c_id) for a_id, c_id in contrasts}
+            full_mapping = dict(zip(contrast_labels, full_labels))
+            column_key = []
+            for number, col in enumerate(clustered_contrasts, start=1):
+                a_id, c_id = label_to_pair[col]
+                description = self._get_contrast_description(a_id, c_id)
+                column_key.append({
+                    "#": number,
+                    "Label": html.unescape(label_mapping[col]),
+                    "Dataset": label_to_accession[col],
+                    "Contrast": full_mapping[col],
+                    "Description": description if isinstance(description, str) else "",
+                })
+            fig.update_layout(meta={"column_key": column_key,
+                                    "dataset_blocks": [list(b) for b in blocks]})
+            self.last_heatmap_context['column_key'] = column_key
+            self.last_heatmap_context['dataset_blocks'] = [list(b) for b in blocks]
 
         # Save to file if specified
         if output_file is not None:

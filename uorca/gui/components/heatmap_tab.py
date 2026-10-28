@@ -855,6 +855,7 @@ def _draw_heatmap(
                 log_streamlit_event("Heatmap generated successfully")
                 # Keep each contrast column readable: scroll instead of squeezing
                 render_scrollable_plotly(fig, key="lfc_heatmap_scroll")
+                _render_column_key(fig)
                 # Persist the last generated figure (legacy fallback not used for UI identity)
                 st.session_state['heatmap_last_fig'] = fig
 
@@ -928,6 +929,7 @@ def _draw_heatmap(
                                     except Exception:
                                         x_axis_labels = {}
 
+                                    fig_meta = dict(fig.layout.meta or {})
                                     meta = {
                                         'generated_at': datetime.utcnow().isoformat() + 'Z',
                                         'p_value_threshold': last_ctx.get('p_value_threshold'),
@@ -937,6 +939,8 @@ def _draw_heatmap(
                                         'clustered_genes': last_ctx.get('clustered_genes'),
                                         'clustered_contrasts': last_ctx.get('clustered_contrasts'),
                                         'x_axis_labels': x_axis_labels,
+                                        # Accession shown once above each block of columns
+                                        'dataset_blocks': fig_meta.get('dataset_blocks', []),
                                         # Default to PDF for publication-quality output
                                         'output_format': 'pdf',
                                         'dpi': 300,
@@ -946,6 +950,7 @@ def _draw_heatmap(
                                         'grid_opacity': 0.3
                                     }
                                     zf.writestr('metadata.json', json.dumps(meta, indent=2))
+                                    zf.writestr('column_key.csv', column_key_csv(fig))
 
                                     repro_script = script_generation.build_repro_script()
                                     zf.writestr('reproduce_heatmap.py', repro_script)
@@ -978,6 +983,44 @@ def _draw_heatmap(
             logger.error(f"Error generating heatmap: {str(e)}", exc_info=True)
             st.error(f"Error generating heatmap: {str(e)}")
             _display_heatmap_error_details(e)
+
+
+COLUMN_KEY_FIELDS = ["#", "Label", "Dataset", "Contrast", "Description"]
+
+
+def column_key_csv(fig) -> str:
+    """CSV of the heatmap's numbered column key (label, dataset, full name, description)."""
+    key = (fig.layout.meta or {}).get("column_key", [])
+    return pd.DataFrame(key, columns=pd.Index(COLUMN_KEY_FIELDS)).to_csv(index=False)
+
+
+def _render_column_key(fig) -> None:
+    """Numbered key under the heatmap: each column's short label, dataset,
+    full contrast name and description, with a CSV download."""
+    key = (fig.layout.meta or {}).get("column_key", [])
+    if not key:
+        st.error("The heatmap has no column key; the column labels cannot be explained.")
+        return
+    st.markdown("**Column key** (left to right)")
+    st.dataframe(
+        pd.DataFrame(key, columns=pd.Index(COLUMN_KEY_FIELDS)),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "#": st.column_config.NumberColumn("#", width="small"),
+            "Label": st.column_config.TextColumn("Label on chart"),
+            "Contrast": st.column_config.TextColumn("Full contrast name"),
+            "Description": st.column_config.TextColumn("Description", width="large"),
+        },
+        key="heatmap_column_key_table",
+    )
+    st.download_button(
+        "Download column key (CSV)",
+        data=column_key_csv(fig),
+        file_name=generate_plot_filename("heatmap_column_key", "csv"),
+        mime="text/csv",
+        key="heatmap_column_key_download",
+    )
 
 
 @log_streamlit_function

@@ -1,8 +1,9 @@
-"""Heatmap contrast labels: readable, unique, never silently cut.
+"""Heatmap contrast labels: short, one line, unique; full information kept elsewhere.
 
-Covers plan 2026-10-27-02 section 3A. The contrast names below are the 17
-GSE295568 contrasts from the PPARg results, six of which are longer than the
-25 characters the old label code kept.
+Covers plan 2026-10-27-02 section 3A and the owner's redesign: tick labels are
+one angled line of at most 25 characters; the accession appears once per
+dataset block; the full name and description are in the hover and the key.
+The contrast names are the 17 GSE295568 contrasts from the PPARg results.
 """
 
 import html
@@ -14,10 +15,10 @@ import pytest
 
 from uorca.gui.results_integration import (
     ELLIPSIS,
-    LABEL_LINE_CHARS,
-    LABEL_MAX_LINES,
+    SHORT_LABEL_CHARS,
     ResultsIntegrator,
     build_contrast_labels,
+    shorten_label,
     wrap_contrast_label,
     wrap_hover_text,
 )
@@ -48,95 +49,61 @@ def _flatten(display: str) -> str:
     return html.unescape(display.replace("<br>", ""))
 
 
-def _assert_well_formed(display: str, full: str) -> None:
-    lines = [html.unescape(line) for line in display.split("<br>")]
-    assert len(lines) <= LABEL_MAX_LINES, display
-    for line in lines:
-        assert len(line) <= LABEL_LINE_CHARS, (line, display)
-    flat = _flatten(display)
-    if flat.endswith(ELLIPSIS):
-        kept = flat[: -len(ELLIPSIS)]
-        assert full.startswith(kept), (display, full)
-        assert len(kept) < len(full)
+def _assert_short_label(display: str, source: str) -> None:
+    """One line, at most SHORT_LABEL_CHARS, and a prefix of ``source`` (plus "…" if cut)."""
+    text = html.unescape(display)
+    assert "<br>" not in display
+    assert len(text) <= SHORT_LABEL_CHARS, text
+    if text.endswith(ELLIPSIS):
+        assert source.startswith(text[: -len(ELLIPSIS)]), (text, source)
     else:
-        assert flat == full, (display, full)
+        assert text == source, (text, source)
 
 
 @pytest.mark.unit
-def test_gse295568_labels_are_unique_and_at_most_three_lines():
-    labels = build_contrast_labels([(None, name) for name in GSE295568_CONTRASTS])
+def test_gse295568_labels_are_short_one_line_and_unique():
+    labels = build_contrast_labels([("GSE295568", name) for name in GSE295568_CONTRASTS])
     displays = [lab.display for lab in labels]
     assert len(set(displays)) == len(displays)
     for lab, name in zip(labels, GSE295568_CONTRASTS):
-        assert lab.full == name
-        _assert_well_formed(lab.display, name)
+        assert lab.full == name and lab.accession == "GSE295568"
+        _assert_short_label(lab.display, name)
 
 
 @pytest.mark.unit
-def test_gse295568_long_names_are_not_truncated():
-    """Every GSE295568 name fits in the label's line budget, so none needs an ellipsis."""
-    labels = build_contrast_labels([(None, name) for name in GSE295568_CONTRASTS])
-    for lab in labels:
-        assert ELLIPSIS not in lab.display
-        assert _flatten(lab.display) == lab.full
-    long_label = next(lab for lab in labels if lab.full.startswith("PPARG_KD1_DLX6"))
-    assert "overexpression" in long_label.display
-
-
-@pytest.mark.unit
-def test_wrap_breaks_on_underscores_without_losing_characters():
-    display = wrap_contrast_label("PPARG_KD1_DLX6_overexpression_vs_control")
-    assert display.split("<br>")[0].endswith("_")
-    assert _flatten(display) == "PPARG_KD1_DLX6_overexpression_vs_control"
-
-
-@pytest.mark.unit
-def test_overlong_name_gets_ellipsis_only_after_three_full_lines():
-    name = "_".join(["segment"] * 20)
-    display = wrap_contrast_label(name)
-    _assert_well_formed(display, name)
-    assert display.endswith(ELLIPSIS)
-    assert len(display.split("<br>")) == LABEL_MAX_LINES
-
-
-@pytest.mark.unit
-def test_token_longer_than_a_line_is_split_not_dropped():
-    name = "averyveryverylongtokenwithoutbreaks_vs_ctrl"
-    display = wrap_contrast_label(name)
-    _assert_well_formed(display, name)
-
-
-@pytest.mark.unit
-def test_accession_prefix_added_when_more_than_one_dataset():
-    labels = build_contrast_labels([
-        ("GSE295568", "PPARG_KD1_EVT_vs_control"),
-        ("GSE298581", "PPARG_KD1_EVT_vs_control"),
-    ])
-    assert labels[0].full == "GSE295568: PPARG_KD1_EVT_vs_control"
-    assert labels[1].full == "GSE298581: PPARG_KD1_EVT_vs_control"
-    assert labels[0].display != labels[1].display
-
-
-@pytest.mark.unit
-def test_multi_dataset_labels_lose_no_characters():
-    """The accession takes its own line; the contrast name keeps its full line budget."""
+def test_accession_is_not_repeated_in_labels():
     pairs = [("GSE295568", n) for n in GSE295568_CONTRASTS] + [
         ("GSE298581", "T0070907_vs_DMSO"), ("GSE298581", "FTX6746_vs_DMSO")]
     labels = build_contrast_labels(pairs)
-    displays = [lab.display for lab in labels]
-    assert len(set(displays)) == len(displays)
-    for lab, (acc, name) in zip(labels, pairs):
-        accession_line, _, name_part = lab.display.partition("<br>")
-        assert accession_line == acc
-        _assert_well_formed(name_part, name)
-        assert ELLIPSIS not in lab.display
-        assert _flatten(name_part) == name
+    assert all("GSE" not in lab.display for lab in labels)
+    assert [lab.accession for lab in labels] == [acc for acc, _ in pairs]
+    assert len({lab.display for lab in labels}) == len(labels)
 
 
 @pytest.mark.unit
-def test_no_accession_prefix_for_a_single_dataset():
-    labels = build_contrast_labels([("GSE295568", name) for name in GSE295568_CONTRASTS])
-    assert all(not lab.full.startswith("GSE295568") for lab in labels)
+def test_shared_leading_words_are_dropped_within_a_dataset():
+    names = ["PPARG_KD1_DLX6_overexpression_vs_control", "PPARG_KD1_EVT_vs_control",
+             "PPARG_KD1_vs_control_TSC_self_renewal"]
+    labels = build_contrast_labels([("GSE1", n) for n in names] + [("GSE2", "PPARG_KD1_alone")])
+    assert [lab.display for lab in labels[:3]] == [
+        "DLX6_overexpression_vs_c" + ELLIPSIS, "EVT_vs_control", "vs_control_TSC_self_rene" + ELLIPSIS]
+    # A dataset with a single contrast keeps its whole name
+    assert labels[3].display == "PPARG_KD1_alone"
+    for lab, name in zip(labels[:3], names):
+        _assert_short_label(lab.display, name[len("PPARG_KD1_"):])
+
+
+@pytest.mark.unit
+def test_prefix_is_not_dropped_when_it_would_empty_a_name():
+    labels = build_contrast_labels([("GSE1", "A_"), ("GSE1", "A_b")])
+    assert [lab.display for lab in labels] == ["A_", "A_b"]
+
+
+@pytest.mark.unit
+def test_shorten_label():
+    assert shorten_label("short") == "short"
+    cut = shorten_label("x" * 40)
+    assert len(cut) == SHORT_LABEL_CHARS and cut.endswith(ELLIPSIS)
 
 
 @pytest.mark.unit
@@ -144,6 +111,22 @@ def test_numbering_never_creates_a_duplicate():
     labels = build_contrast_labels([(None, "a (2)"), (None, "a"), (None, "a")])
     displays = [lab.display for lab in labels]
     assert displays == ["a (2)", "a", "a (3)"]
+
+
+@pytest.mark.unit
+def test_same_name_in_two_datasets_gets_unique_labels():
+    labels = build_contrast_labels([("GSE1", "FX909_vs_DMSO"), ("GSE2", "FX909_vs_DMSO")])
+    assert [lab.display for lab in labels] == ["FX909_vs_DMSO", "FX909_vs_DMSO (2)"]
+
+
+@pytest.mark.unit
+def test_colliding_truncated_labels_are_numbered_within_the_length_limit():
+    stem = "_".join(["segment"] * 20)
+    labels = build_contrast_labels([("GSE1", stem + "_a"), ("GSE2", stem + "_b")])
+    displays = [html.unescape(lab.display) for lab in labels]
+    assert len(set(displays)) == 2
+    assert displays[1].endswith("(2)")
+    assert all(len(d) <= SHORT_LABEL_CHARS for d in displays)
 
 
 @pytest.mark.unit
@@ -158,12 +141,10 @@ def test_html_in_names_and_hover_is_escaped():
 
 
 @pytest.mark.unit
-def test_colliding_truncated_labels_are_numbered():
-    stem = "_".join(["segment"] * 20)
-    labels = build_contrast_labels([(None, stem + "_a"), (None, stem + "_b")])
-    displays = [lab.display for lab in labels]
-    assert len(set(displays)) == 2
-    assert displays[1].endswith("(2)")
+def test_group_label_wrapping_keeps_characters():
+    """wrap_contrast_label is used for expression-plot group labels."""
+    display = wrap_contrast_label("PPARG_KD1_DLX6_overexpression_vs_control")
+    assert _flatten(display) == "PPARG_KD1_DLX6_overexpression_vs_control"
 
 
 @pytest.mark.unit
@@ -241,30 +222,47 @@ def test_heatmap_hover_and_axes(two_dataset_results):
 
     ticktext = list(fig.layout.xaxis.ticktext)
     assert len(set(ticktext)) == 3
-    assert all(t.startswith("GSE") for t in ticktext)
+    assert all("GSE" not in t for t in ticktext)
+    assert fig.layout.xaxis.tickangle == -45
+
+    # Columns are grouped per dataset, and each accession is shown once
+    meta = fig.layout.meta
+    assert [b[0] for b in meta["dataset_blocks"]] == ["GSE1", "GSE2"]
+    assert [a.text for a in fig.layout.annotations if "GSE" in a.text] == ["<b>GSE1</b>", "<b>GSE2</b>"]
 
     custom = fig.data[0].customdata
-    # Column order follows clustering; index each column by its full name.
-    by_full = {custom[0][j][2]: custom[0][j] for j in range(len(custom[0]))}
-    assert set(by_full) == {
-        "GSE1: shared_vs_control",
-        "GSE1: PPARG_KD1_DLX6_overexpression_vs_control",
-        "GSE2: shared_vs_control",
+    # Hover: dataset (customdata[1]) and full contrast name (customdata[2])
+    by_col = {(custom[0][j][1], custom[0][j][2]): custom[0][j] for j in range(len(custom[0]))}
+    assert set(by_col) == {
+        ("GSE1", "shared_vs_control"),
+        ("GSE1", "PPARG_KD1_DLX6_overexpression_vs_control"),
+        ("GSE2", "shared_vs_control"),
     }
     # Descriptions are keyed by (analysis_id, contrast_id), not by name alone.
-    assert by_full["GSE1: shared_vs_control"][0] == "Description for dataset one"
-    assert by_full["GSE2: shared_vs_control"][0] == "Description for dataset two"
+    assert by_col[("GSE1", "shared_vs_control")][0] == "Description for dataset one"
+    assert by_col[("GSE2", "shared_vs_control")][0] == "Description for dataset two"
     # Long formula is wrapped at 80 characters and capped at 300.
-    formula = by_full["GSE1: PPARG_KD1_DLX6_overexpression_vs_control"][3]
+    formula = by_col[("GSE1", "PPARG_KD1_DLX6_overexpression_vs_control")][3]
     assert all(len(line) <= 80 for line in formula.split("<br>"))
     assert formula.endswith(ELLIPSIS)
     assert len(formula.replace("<br>", "")) <= 300 + len(ELLIPSIS)
 
-    # Display labels are stored with the context used for the download package.
+    # Numbered key in column order: label on chart, dataset, full name, description
+    key = meta["column_key"]
+    assert [row["#"] for row in key] == [1, 2, 3]
+    assert [html.escape(row["Label"], quote=False) for row in key] == ticktext
+    assert {(row["Dataset"], row["Contrast"], row["Description"]) for row in key} == {
+        ("GSE1", "shared_vs_control", "Description for dataset one"),
+        ("GSE1", "PPARG_KD1_DLX6_overexpression_vs_control", "Long one"),
+        ("GSE2", "shared_vs_control", "Description for dataset two"),
+    }
+    assert [row["Dataset"] for row in key] == ["GSE1", "GSE1", "GSE2"]
+
+    # The download-package context matches the figure
     ctx = ri.last_heatmap_context
     label_map = dict(zip(ctx["contrast_labels"], ctx["simplified_labels"]))
     assert [label_map[c] for c in ctx["clustered_contrasts"]] == ticktext
-    assert set(ctx["full_labels"]) == set(by_full)
+    assert ctx["column_key"] == key
 
 
 @pytest.mark.unit

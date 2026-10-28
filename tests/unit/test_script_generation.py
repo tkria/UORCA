@@ -164,11 +164,12 @@ def test_build_readme_text_mentions_formats():
     assert 'PDF' in readme
     assert 'PNG' in readme or 'SVG' in readme
 
-def test_build_repro_script_sizes_margins_for_wrapped_labels():
-    """The script uses automargin and a bottom margin computed from <br>-wrapped labels, like the app."""
+def test_build_repro_script_matches_app_label_layout():
+    """Angled one-line labels, a computed bottom margin, automargin and dataset blocks, like the app."""
     script = build_repro_script()
 
-    assert "split('<br>')" in script
+    assert "tickangle=-45" in script
+    assert "dataset_blocks" in script
     assert "b=bottom_margin" in script
     assert "b=120" not in script
     assert "automargin=True" in script
@@ -177,8 +178,8 @@ def test_build_repro_script_sizes_margins_for_wrapped_labels():
 
 
 @pytest.mark.unit
-def test_repro_script_renders_wrapped_labels(tmp_path, monkeypatch):
-    """Run the generated script on app-style wrapped labels; the layout gets automargin and a larger margin."""
+def test_repro_script_renders_app_labels_and_dataset_blocks(tmp_path, monkeypatch):
+    """Run the generated script on app-style labels from two datasets."""
     import json
     import runpy
     import sys
@@ -190,14 +191,15 @@ def test_repro_script_renders_wrapped_labels(tmp_path, monkeypatch):
 
     names = ["PPARG_KD1_DLX6_overexpression_vs_control", "PPARG_KD1_vs_control_TSC_self_renewal",
              "EVT_DMOG_vs_control"]
-    labels = build_contrast_labels([(None, n) for n in names])
-    cols = [f"GSE1_{n}" for n in names]
+    labels = build_contrast_labels([("GSE1", names[0]), ("GSE1", names[1]), ("GSE2", names[2])])
+    cols = [f"GSE1_{names[0]}", f"GSE1_{names[1]}", f"GSE2_{names[2]}"]
     pd.DataFrame({"Gene": ["A", "B"], cols[0]: [1.5, -2.0], cols[1]: [0.0, 3.0], cols[2]: [2.2, 0.0]}).to_csv(
         tmp_path / "heatmap_data.csv", index=False)
     (tmp_path / "metadata.json").write_text(json.dumps({
         "output_format": "png",
         "x_axis_labels": {c: lab.display for c, lab in zip(cols, labels)},
         "clustered_contrasts": cols,
+        "dataset_blocks": [["GSE1", 0, 1], ["GSE2", 2, 2]],
     }))
     script = tmp_path / "reproduce_heatmap.py"
     script.write_text(build_repro_script())
@@ -217,7 +219,9 @@ def test_repro_script_renders_wrapped_labels(tmp_path, monkeypatch):
     assert list(fig.layout.xaxis.ticktext) == [lab.display for lab in labels]
     assert fig.layout.xaxis.automargin is True
     assert fig.layout.yaxis.automargin is True
-    assert fig.layout.margin.b > 120
+    assert fig.layout.xaxis.tickangle == -45
+    assert [a.text for a in fig.layout.annotations] == ["<b>GSE1</b>", "<b>GSE2</b>"]
+    assert fig.layout.margin.b > 100
 
 
 @pytest.mark.unit
