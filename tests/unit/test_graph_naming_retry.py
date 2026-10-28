@@ -287,3 +287,32 @@ def test_contrast_manifest_check(tmp_path):
     (tmp_path / "contrast_manifest.csv").unlink()
     with pytest.raises(RuntimeError, match="did not write"):
         _check_contrast_manifest(str(tmp_path), ["KO_vs_WT"])
+
+
+async def _test_empty_group_value_is_missing_not_group_x(tmp_path):
+    """An empty label must not silently become R group 'X'; it is flagged."""
+    state = WorkflowState(dataset_id="GSE000003")
+    state.metadata_df = pd.DataFrame(
+        {"GSM": [f"GSM{i}" for i in range(6)], "genotype": ["WT", "WT", "KO", "KO", "", ""]}
+    )
+    out = MetadataAnalysisOut(
+        selected_columns=["genotype"], merged_column_name="genotype",
+        unique_groups=["WT", "KO"], reasoning="r",
+    )
+    ctx = _ctx(state, tmp_path)
+    with patch(
+        "uorca.graph.nodes.metadata.metadata_analysis_agent.run",
+        new=AsyncMock(return_value=type("R", (), {"output": out})()),
+    ):
+        nxt = await MetadataAnalysisNode().run(ctx)
+
+    assert isinstance(nxt, ContrastDesignNode)
+    assert [s.signal for s in state.review_signals] == ["missing_group_values"]
+    assert state.review_signals[0].severity == "high"
+    names = state.group_level_names or {}
+    assert "" not in names and "X" not in names.values()
+    assert names["nan"] == "nan"
+
+
+def test_empty_group_value_is_missing_not_group_x(tmp_path):
+    asyncio.run(_test_empty_group_value_is_missing_not_group_x(tmp_path))

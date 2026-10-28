@@ -15,7 +15,9 @@ from uorca.core.naming import (
     NamingError,
     assign_level_names,
     check_joined_levels,
+    is_missing_value,
     legacy_r_naming_hazards,
+    missing_group_signals,
 )
 
 from ..agents import metadata_analysis_agent
@@ -108,6 +110,13 @@ Research question: {ctx.state.research_question or 'General exploratory analysis
                 df[ctx.state.merged_column] = df[result.output.selected_columns[0]]
             # else: single column with same name - column already exists, no action needed
 
+            # Missing or empty group values: warn and flag for review, or stop
+            # (one switch, naming.MISSING_GROUP_POLICY; owner question Q13).
+            selected = list(result.output.selected_columns)
+            ctx.state.review_signals = missing_group_signals(
+                df[selected].itertuples(index=False), selected
+            )
+
             # Normalise merged_column to an R-safe identifier. R's read.csv with
             # default check.names=TRUE rewrites a header like "disease state" to
             # "disease.state", which then no longer matches the merged_column
@@ -123,6 +132,11 @@ Research question: {ctx.state.research_question or 'General exploratory analysis
                 )
                 df.rename(columns={ctx.state.merged_column: safe_name}, inplace=True)
                 ctx.state.merged_column = safe_name
+
+            # An empty or blank label is a missing value, not a group named ""
+            # (which R would call "X").
+            merged = df[ctx.state.merged_column]
+            df[ctx.state.merged_column] = merged.mask(merged.map(is_missing_value))
 
             # CRITICAL: Save modified dataframe back to state
             ctx.state.metadata_df = df
@@ -141,14 +155,6 @@ Research question: {ctx.state.research_question or 'General exploratory analysis
             if len(ctx.state.unique_groups) < 2:
                 raise ValueError(
                     f"Need at least 2 groups for DE analysis, found: {ctx.state.unique_groups}"
-                )
-
-            n_missing = int(df[ctx.state.merged_column].isna().sum())
-            if n_missing:
-                logger.warning(
-                    "%d samples have no value in %r; they form their own group 'nan'",
-                    n_missing,
-                    ctx.state.merged_column,
                 )
 
             # Give every level a valid, unique R name now, before Kallisto, so

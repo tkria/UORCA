@@ -110,6 +110,7 @@ Design biologically meaningful contrasts that:
                 level_names=level_names,
                 level_counts=counts,
                 contrasts=contrasts,
+                review_signals=ctx.state.review_signals,
             )
             ctx.state.contrasts = contrasts
 

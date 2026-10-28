@@ -43,6 +43,7 @@ class WorkflowState:
     r_group_column: Optional[str] = None
     group_level_names: Optional[Dict[str, str]] = None  # raw level -> R name
     group_source_columns: Optional[List[str]] = None
+    review_signals: List[Any] = field(default_factory=list)  # naming.ReviewSignal items
     contrasts: Optional[List[Dict[str, str]]] = None
     contrast_path: Optional[str] = None
 

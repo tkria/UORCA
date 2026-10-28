@@ -25,7 +25,9 @@ from uorca.core.naming import (
     contrast_design_issues,
     contrast_name_issues,
     contrast_weights,
+    is_missing_value,
     legacy_r_naming_hazards,
+    missing_group_signals,
     normalise_contrasts,
     normalise_expression,
 )
@@ -326,3 +328,23 @@ def test_whitespace_is_normalised_to_single_ascii_spaces(expression):
         group_column="g", source_columns=["g"], level_names=mapping, level_counts={}, contrasts=rows
     )
     assert record["contrasts"][0]["expression"] == "KO - WT"
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), pd.NA, "", "   ", "\t"])
+def test_missing_values(value):
+    assert is_missing_value(value)
+
+
+@pytest.mark.parametrize("value", ["WT", "nan", "NA", 0, 0.0])
+def test_present_values(value):
+    assert not is_missing_value(value)
+
+
+def test_missing_group_values_flag_or_stop():
+    rows = [("WT", "d1"), ("", "d2"), ("KO", float("nan")), ("KO", "d3")]
+    signals = missing_group_signals(rows, ["genotype", "donor"], policy="flag")
+    assert [(s.signal, s.severity) for s in signals] == [("missing_group_values", "high")]
+    assert "2 of 4 samples" in signals[0].reason
+    with pytest.raises(NamingError, match="2 of 4 samples"):
+        missing_group_signals(rows, ["genotype", "donor"], policy="stop")
+    assert missing_group_signals([("WT",), ("KO",)], ["genotype"]) == []

@@ -19,7 +19,7 @@ This module moves the naming to Python, before Kallisto:
   deterministic parser in :mod:`uorca.core.contrast_checks`.
 - :func:`build_naming_record` builds the ``metadata/naming.json`` record.
 
-Pure: no LLM, no R, no pandas.
+No LLM and no R.
 """
 
 from __future__ import annotations
@@ -27,12 +27,14 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date
-from typing import Iterable, Mapping, Sequence
+from dataclasses import asdict
+from typing import Iterable, Literal, Mapping, Sequence
 
 from unidecode import unidecode
 
 from .contrast_checks import check_contrasts, level_name_map
 from .design_validation import R_RESERVED_WORDS, r_make_names
+from .review_flags import ReviewSignal
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,15 @@ SAFE_LEVEL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9._]*$")
 in every locale (F18)."""
 
 SLUG_MAX_LENGTH = 32
+
+
+MissingGroupPolicy = Literal["flag", "stop"]
+
+MISSING_GROUP_POLICY: MissingGroupPolicy = "flag"
+"""What to do when a sample has no value (NaN, None, empty or blank text) in a
+group column. ``"flag"``: log a warning and add a high review signal; the
+samples keep a group of their own. ``"stop"``: raise :class:`NamingError`.
+The owner has not decided yet (question Q13); switch here."""
 
 
 class NamingError(ValueError):
@@ -171,6 +182,57 @@ def legacy_r_naming_hazards(raw_levels: Iterable[object]) -> list[str]:
             if other != short and short in other:
                 hazards.append(f"level {short!r} occurs inside level {other!r}")
     return hazards
+
+
+def is_missing_value(value: object) -> bool:
+    """True for None, NaN (also ``pd.NA``) and empty or whitespace-only text.
+
+    An empty label is treated as missing: ``make.names("")`` is ``"X"``, so it
+    would otherwise become a group called X without a message.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    try:
+        return bool(value != value)  # NaN is the only value not equal to itself
+    except TypeError:  # pd.NA cannot be coerced to bool
+        return True
+
+
+def missing_group_signals(
+    rows: Iterable[Sequence[object]],
+    columns: Sequence[str],
+    *,
+    policy: MissingGroupPolicy | None = None,
+) -> list[ReviewSignal]:
+    """Apply the missing-value policy to the group columns of every sample.
+
+    Args:
+        rows: One tuple per sample with its values in ``columns``.
+        columns: The selected group columns, for the message.
+        policy: Overrides :data:`MISSING_GROUP_POLICY` (for tests).
+
+    Returns:
+        A high ``missing_group_values`` signal when a sample has a missing or
+        empty value, else an empty list.
+
+    Raises:
+        NamingError: when the policy is ``"stop"`` and a value is missing.
+    """
+    rows = list(rows)
+    missing = [i for i, row in enumerate(rows) if any(is_missing_value(v) for v in row)]
+    if not missing:
+        return []
+    message = (
+        f"{len(missing)} of {len(rows)} samples have a missing or empty value in the "
+        f"group column(s) {list(columns)} (sample rows {missing[:10]}); they form a "
+        "group of their own."
+    )
+    if (policy or MISSING_GROUP_POLICY) == "stop":
+        raise NamingError(message)
+    logger.warning("NEEDS REVIEW: %s", message)
+    return [ReviewSignal("missing_group_values", "high", message)]
 
 
 def check_joined_levels(rows: Iterable[Sequence[object]], separator: str = "_") -> None:
@@ -321,6 +383,7 @@ def build_naming_record(
     level_names: Mapping[str, str],
     level_counts: Mapping[str, int],
     contrasts: Sequence[Mapping[str, str]],
+    review_signals: Sequence[ReviewSignal] = (),
 ) -> dict:
     """Return the ``metadata/naming.json`` record (schema version 1).
 
@@ -354,4 +417,5 @@ def build_naming_record(
             }
             for c in contrasts
         ],
+        "review_signals": [asdict(sig) for sig in review_signals],
     }
