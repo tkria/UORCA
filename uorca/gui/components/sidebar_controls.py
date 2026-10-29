@@ -8,7 +8,7 @@ have been moved to their respective tabs.
 import logging
 import streamlit as st
 import pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 
 from .helpers import (
     load_environment,
@@ -55,6 +55,21 @@ def render_sidebar_controls(ri: ResultsIntegrator, results_dir: str) -> Dict[str
 
 
 @log_streamlit_function
+def merge_dataset_selection(previous: Set[str], visible: Set[str], checked: Set[str]) -> Set[str]:
+    """Apply the checkboxes of the visible (search-filtered) rows to a selection.
+
+    Datasets not shown by the current search keep their previous state, so
+    searching for one dataset, applying, then searching for another adds to the
+    selection instead of replacing it. A visible row that is unchecked is removed.
+
+    Args:
+        previous: Accessions selected before this Apply.
+        visible: Accessions shown in the table when Apply was pressed.
+        checked: Visible accessions whose checkbox is ticked.
+    """
+    return (set(previous) - set(visible)) | (set(checked) & set(visible))
+
+
 def _render_dataset_selection_section(ri: ResultsIntegrator, results_dir: str) -> Optional[Dict[str, Any]]:
     """Render the dataset selection section."""
     with st.sidebar.expander("Dataset Selection", expanded=True):
@@ -159,11 +174,16 @@ def _render_dataset_selection_section(ri: ResultsIntegrator, results_dir: str) -
                 dataset_submitted = st.form_submit_button("Apply Dataset Selection", type="primary")
 
                 if dataset_submitted:
-                    # Get selected datasets
-                    selected_datasets = set()
+                    # Merge the visible rows' checkboxes into the existing selection:
+                    # datasets hidden by the search filter keep their state.
+                    checked = set()
+                    visible = set()
                     if not edited_df.empty:
-                        selected_rows = edited_df[edited_df["Select"] == True]
-                        selected_datasets = set(selected_rows["Accession"].tolist())
+                        visible = set(edited_df["Accession"].tolist())
+                        checked = set(edited_df[edited_df["Select"] == True]["Accession"].tolist())
+                    selected_datasets = merge_dataset_selection(
+                        st.session_state['selected_datasets_from_sidebar'], visible, checked
+                    )
 
                     # Update session state
                     st.session_state['selected_datasets_from_sidebar'] = selected_datasets
@@ -174,7 +194,10 @@ def _render_dataset_selection_section(ri: ResultsIntegrator, results_dir: str) -
                 st.info("No datasets available")
                 st.form_submit_button("Apply Dataset Selection", disabled=True)
 
-        # Show current selection summary (removed "No datasets selected" message)
+        # Show the full selection, including datasets hidden by the search filter
+        current = st.session_state['selected_datasets_from_sidebar']
+        if current:
+            st.caption(f"Selected ({len(current)}): {', '.join(sorted(current))}")
 
         # Return results if we have selections
         if st.session_state['selected_datasets_from_sidebar']:

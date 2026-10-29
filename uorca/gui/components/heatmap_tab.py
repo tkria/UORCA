@@ -31,9 +31,10 @@ from .helpers import (
     get_organism_display_name,
     get_valid_contrasts_with_data,
     plotly_fig_to_pdf_bytes,
-    generate_plot_filename
+    generate_plot_filename,
+    render_scrollable_plotly,
 )
-from uorca.gui.results_integration import ResultsIntegrator
+from uorca.gui.results_integration import ResultsIntegrator, ADJUSTED_P_LABEL, ADJUSTED_P_HELP
 
 # Import core modules
 from uorca.core import validation, script_generation
@@ -43,7 +44,8 @@ from uorca.gui.ortholog_mapper import (
     get_ortholog_summary,
     get_taxid_from_organism,
     create_ortholog_mapping_table,
-    create_hierarchical_gene_list
+    create_hierarchical_gene_list,
+    ortholog_file_error,
 )
 
 # Set up fragment decorator
@@ -170,14 +172,15 @@ def render_heatmap_tab(ri: ResultsIntegrator, selected_datasets: List[str], **kw
                         species_genes_for_cache = species_genes
                         with st.expander(f"Copy Frequent DEGs for {get_organism_display_name(organism)} ({len(species_genes)})", expanded=False):
                             st.code("\n".join(species_genes) if species_genes else "", language=None)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Could not list frequent DEGs for {organism}: {e}", exc_info=True)
+                        st.warning(f"Could not list frequent DEGs for {get_organism_display_name(organism)}: {e}")
 
                 # Info panel: appears once plots are generated (placed above heatmap)
                 with st.expander("What this heatmap shows", expanded=False):
                     st.markdown(
                         f"- Values are log2 fold change (log2FC) computed within each dataset's contrast.\n"
-                        f"- Only significant values are shown: adj.P.Val < {gene_params.get('pvalue_thresh', 0.05)} and |logFC| > {gene_params.get('lfc_thresh', 1.0)}.\n"
+                        f"- Only significant values are shown: {ADJUSTED_P_LABEL} < {gene_params.get('pvalue_thresh', 0.05)} and |logFC| > {gene_params.get('lfc_thresh', 1.0)}.\n"
                         f"  Non-significant entries are set to 0 and hidden by filtering."
                     )
 
@@ -251,7 +254,7 @@ def render_heatmap_tab(ri: ResultsIntegrator, selected_datasets: List[str], **kw
                             with st.expander("What this heatmap shows", expanded=False):
                                 st.markdown(
                                     f"- Values are log2 fold change (log2FC) computed within each dataset's contrast.\n"
-                                    f"- Only significant values are shown: adj.P.Val < {gene_params.get('pvalue_thresh', 0.05)} and |logFC| > {gene_params.get('lfc_thresh', 1.0)}.\n"
+                                    f"- Only significant values are shown: {ADJUSTED_P_LABEL} < {gene_params.get('pvalue_thresh', 0.05)} and |logFC| > {gene_params.get('lfc_thresh', 1.0)}.\n"
                                     f"  Non-significant entries are set to 0 and hidden by filtering."
                                 )
                             _draw_heatmap(
@@ -327,7 +330,7 @@ def render_heatmap_tab(ri: ResultsIntegrator, selected_datasets: List[str], **kw
                         with st.expander("What does this plot mean?", expanded=False):
                             st.markdown(
                                 f"- Values are log2 fold change (log2FC) computed within each dataset's contrast.\n"
-                                f"- Only significant values are shown: adj.P.Val < {params.get('pvalue_thresh', 0.05)} and |logFC| > {params.get('lfc_thresh', 1.0)}.\n"
+                                f"- Only significant values are shown: {ADJUSTED_P_LABEL} < {params.get('pvalue_thresh', 0.05)} and |logFC| > {params.get('lfc_thresh', 1.0)}.\n"
                                 f"  Non-significant entries are set to 0 and hidden by filtering."
                             )
                         _draw_heatmap(
@@ -356,7 +359,7 @@ def render_heatmap_tab(ri: ResultsIntegrator, selected_datasets: List[str], **kw
                 with st.expander("What does this plot mean?", expanded=False):
                     st.markdown(
                         f"- Values are log2 fold change (log2FC) computed within each dataset's contrast.\n"
-                        f"- Only significant values are shown: adj.P.Val < {params.get('pvalue_thresh', 0.05)} and |logFC| > {params.get('lfc_thresh', 1.0)}.\n"
+                        f"- Only significant values are shown: {ADJUSTED_P_LABEL} < {params.get('pvalue_thresh', 0.05)} and |logFC| > {params.get('lfc_thresh', 1.0)}.\n"
                         f"  Non-significant entries are set to 0 and hidden by filtering."
                     )
                 _draw_heatmap(
@@ -480,9 +483,14 @@ def _render_combined_heatmap_form(ri: ResultsIntegrator, selected_datasets: List
 
         # Ortholog expansion option (only for Custom genes)
         if gene_selection_method == "Custom":
+            # The orthologue table is downloaded separately; say so loudly if it is missing
+            ortholog_error = ortholog_file_error()
+            if ortholog_error:
+                st.error(ortholog_error)
             check_orthologs = st.checkbox(
                 "Check for orthologues",
                 value=False,
+                disabled=ortholog_error is not None,
                 help="Expand the input gene list to include orthologues in other species present in the selected datasets. Ortholog identification uses GeneOrthology.",
                 key="heatmap_check_orthologs"
             )
@@ -501,9 +509,9 @@ def _render_combined_heatmap_form(ri: ResultsIntegrator, selected_datasets: List
             )
         with col2:
             pvalue_thresh = st.text_input(
-                "P-value Threshold",
+                f"{ADJUSTED_P_LABEL} threshold",
                 value="0.05",
-                help="Adjusted p-value threshold for significance",
+                help=f"Genes count as significant when their {ADJUSTED_P_HELP} is below this value",
                 key="heatmap_combined_pvalue_threshold"
             )
 
@@ -845,7 +853,9 @@ def _draw_heatmap(
 
             if fig:
                 log_streamlit_event("Heatmap generated successfully")
-                st.plotly_chart(fig, use_container_width=True)
+                # Keep each contrast column readable: scroll instead of squeezing
+                render_scrollable_plotly(fig, key="lfc_heatmap_scroll")
+                _render_column_key(fig)
                 # Persist the last generated figure (legacy fallback not used for UI identity)
                 st.session_state['heatmap_last_fig'] = fig
 
@@ -919,6 +929,7 @@ def _draw_heatmap(
                                     except Exception:
                                         x_axis_labels = {}
 
+                                    fig_meta = dict(fig.layout.meta or {})
                                     meta = {
                                         'generated_at': datetime.utcnow().isoformat() + 'Z',
                                         'p_value_threshold': last_ctx.get('p_value_threshold'),
@@ -928,6 +939,8 @@ def _draw_heatmap(
                                         'clustered_genes': last_ctx.get('clustered_genes'),
                                         'clustered_contrasts': last_ctx.get('clustered_contrasts'),
                                         'x_axis_labels': x_axis_labels,
+                                        # Accession shown once above each block of columns
+                                        'dataset_blocks': fig_meta.get('dataset_blocks', []),
                                         # Default to PDF for publication-quality output
                                         'output_format': 'pdf',
                                         'dpi': 300,
@@ -937,6 +950,7 @@ def _draw_heatmap(
                                         'grid_opacity': 0.3
                                     }
                                     zf.writestr('metadata.json', json.dumps(meta, indent=2))
+                                    zf.writestr('column_key.csv', column_key_csv(fig))
 
                                     repro_script = script_generation.build_repro_script()
                                     zf.writestr('reproduce_heatmap.py', repro_script)
@@ -969,6 +983,44 @@ def _draw_heatmap(
             logger.error(f"Error generating heatmap: {str(e)}", exc_info=True)
             st.error(f"Error generating heatmap: {str(e)}")
             _display_heatmap_error_details(e)
+
+
+COLUMN_KEY_FIELDS = ["#", "Label", "Dataset", "Contrast", "Description"]
+
+
+def column_key_csv(fig) -> str:
+    """CSV of the heatmap's numbered column key (label, dataset, full name, description)."""
+    key = (fig.layout.meta or {}).get("column_key", [])
+    return pd.DataFrame(key, columns=pd.Index(COLUMN_KEY_FIELDS)).to_csv(index=False)
+
+
+def _render_column_key(fig) -> None:
+    """Numbered key under the heatmap: each column's short label, dataset,
+    full contrast name and description, with a CSV download."""
+    key = (fig.layout.meta or {}).get("column_key", [])
+    if not key:
+        st.error("The heatmap has no column key; the column labels cannot be explained.")
+        return
+    st.markdown("**Column key** (left to right)")
+    st.dataframe(
+        pd.DataFrame(key, columns=pd.Index(COLUMN_KEY_FIELDS)),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "#": st.column_config.NumberColumn("#", width="small"),
+            "Label": st.column_config.TextColumn("Label on chart"),
+            "Contrast": st.column_config.TextColumn("Full contrast name"),
+            "Description": st.column_config.TextColumn("Description", width="large"),
+        },
+        key="heatmap_column_key_table",
+    )
+    st.download_button(
+        "Download column key (CSV)",
+        data=column_key_csv(fig),
+        file_name=generate_plot_filename("heatmap_column_key", "csv"),
+        mime="text/csv",
+        key="heatmap_column_key_download",
+    )
 
 
 @log_streamlit_function

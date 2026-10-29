@@ -47,6 +47,9 @@ cp .env.example .env
 #    (the example input below has human and mouse datasets)
 ./download_kallisto_indices.sh human
 ./download_kallisto_indices.sh mouse
+#    and the orthologue table for cross-species gene lists in the explorer
+#    (Windows: powershell -ExecutionPolicy Bypass -File download_orthologues.ps1)
+./download_orthologues.sh
 
 # 4. Identify datasets for a research question
 uv run uorca identify -q "type 1 diabetes islet transcriptome" -o identification_results
@@ -463,6 +466,9 @@ All input data is public. UORCA downloads it at run time and does not commit it 
 - Kallisto transcriptome indices from
   [pachterlab/kallisto-transcriptome-indices](https://github.com/pachterlab/kallisto-transcriptome-indices),
   release `v1`, through `download_kallisto_indices.sh`.
+- The mammalian orthologue table from the Allen Institute
+  [GeneOrthology](https://github.com/AllenInstitute/GeneOrthology) repository (NCBI Gene orthologs snapshot of
+  2023-11-13, BSD-2-Clause), through `download_orthologues.sh` or `download_orthologues.ps1`.
 
 UORCA sends dataset text to the configured LLM provider. The AI assistant also sends differential expression
 statistics to the provider. See [`data/README.md`](data/README.md) for the sources, versions, example data and
@@ -545,7 +551,8 @@ and the contrasts before you use the results.
   Bedrock provider). API calls cost money.
 - **Species.** Bundled download support covers kallisto indices for human, mouse, dog, monkey and zebrafish only.
 - **Orthologue mapping.** Cross-species mapping in the explorer reads `data/mammalian_orthologues.csv`. The
-  repository does not distribute this file.
+  repository does not distribute this file; download it with `./download_orthologues.sh`
+  (Windows: `download_orthologues.ps1`).
 - **Known defect.** `TaskManager` returns task results as strings (`'10'` instead of `10`), because results
   go through a `TEXT` database column. The test `tests/unit/test_task_manager.py::test_task_submission`
   records this defect.

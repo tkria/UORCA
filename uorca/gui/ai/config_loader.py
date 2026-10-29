@@ -195,7 +195,7 @@ class AIAssistantConfigLoader:
         summary.append("")
 
         summary.append(f"Default LFC Threshold: {self.ui_settings.default_lfc_threshold}")
-        summary.append(f"Default P-value Threshold: {self.ui_settings.default_p_threshold}")
+        summary.append(f"Default Adjusted p-value (BH) Threshold: {self.ui_settings.default_p_threshold}")
 
         return "\n".join(summary)
 

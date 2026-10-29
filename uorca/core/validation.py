@@ -7,11 +7,11 @@ def validate_threshold_values(
     pvalue_thresh: str
 ) -> Tuple[float, float, bool]:
     """
-    Validate log fold-change and p-value threshold inputs.
+    Validate log fold-change and adjusted p-value (BH) threshold inputs.
 
     Args:
         lfc_thresh: Log fold-change threshold as string
-        pvalue_thresh: P-value threshold as string
+        pvalue_thresh: Adjusted p-value (BH) threshold as string
 
     Returns:
         Tuple of (lfc_value, pvalue_value, has_error)
