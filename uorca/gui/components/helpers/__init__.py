@@ -482,7 +482,19 @@ def add_rscript_bundle_to_zip(
 
     # Group column selection
     group_col = None
-    if info and isinstance(info.get("merged_column"), str) and info["merged_column"] in sample_df.columns:
+    naming_file = dataset_path / "metadata" / "naming.json"
+    if naming_file.exists():
+        # Runs with naming.json write contrasts in the R level names of this
+        # column (uorca_group); the raw merged_column would not match them.
+        import json
+        r_col = json.loads(naming_file.read_text(encoding="utf-8"))["group_column"]["r_name"]
+        if r_col not in sample_df.columns:
+            raise ValueError(
+                f"{naming_file} names group column {r_col!r}, which is not in "
+                "edger_analysis_samples.csv; the R bundle cannot be built."
+            )
+        group_col = r_col
+    elif info and isinstance(info.get("merged_column"), str) and info["merged_column"] in sample_df.columns:
         group_col = info["merged_column"]
     elif "merged_column" in sample_df.columns:
         group_col = "merged_column"

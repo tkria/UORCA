@@ -14,16 +14,213 @@ create_plot_output_dirs <- function(output_dir) {
   return(analysis_dir)
 }
 
+# Folder name of a contrast. The rule is unchanged, so existing result folders
+# keep their names; check_contrast_folders() makes sure no two contrasts share
+# a folder.
+contrast_folder <- function(contrast_name) {
+    folder <- gsub("[^a-zA-Z0-9]", "_", contrast_name)
+    if (!grepl("^[A-Za-z0-9_]+$", folder)) {
+        stop("Contrast name '", contrast_name, "' gives an unusable folder name '", folder, "'.",
+             call. = FALSE)
+    }
+    folder
+}
+
+# Stop before any result is written if two contrasts map to one folder
+# (KO.vs.WT and KO_vs_WT, or KO_vs_WT and ko_vs_wt on a case-insensitive file
+# system). Warn about folders with results that this run will not write.
+check_contrast_folders <- function(output_dir, contrast_names) {
+    folders <- vapply(contrast_names, contrast_folder, character(1))
+    key <- tolower(folders)
+    clash <- unique(key[duplicated(key)])
+    if (length(clash) > 0) {
+        groups <- vapply(clash, function(k) paste0("'", contrast_names[key == k], "'", collapse = " and "),
+                         character(1))
+        stop("Contrasts would write to the same folder: ", paste(groups, collapse = "; "),
+             ". Give each contrast a name that differs in more than case or punctuation.",
+             call. = FALSE)
+    }
+    analysis_dir <- file.path(output_dir, "RNAseqAnalysis")
+    existing <- list.dirs(analysis_dir, full.names = FALSE, recursive = FALSE)
+    existing <- existing[file.exists(file.path(analysis_dir, existing, "DEG.csv"))]
+    stale <- setdiff(existing, folders)
+    if (length(stale) > 0) {
+        warning("RNAseqAnalysis has results from an earlier run that this run does not ",
+                "replace: ", paste(stale, collapse = ", "), call. = FALSE, immediate. = TRUE)
+    }
+    reused <- intersect(existing, folders)
+    if (length(reused) > 0) {
+        cat("Overwriting results from an earlier run in:", paste(reused, collapse = ", "), "\n")
+    }
+    invisible(folders)
+}
+
+# Folders whose DEG.csv this run has written; a second write would mean two
+# contrasts share a folder.
+written_contrast_folders <- new.env()
+
 # Function to create a contrast-specific directory
 create_contrast_dir <- function(output_dir, contrast_name) {
-  # Clean contrast name for file system use
-  clean_contrast <- gsub("[^a-zA-Z0-9]", "_", contrast_name)
+    clean_contrast <- contrast_folder(contrast_name)
 
-  # Create contrast-specific directory
-  contrast_dir <- file.path(output_dir, "RNAseqAnalysis", clean_contrast)
-  dir.create(contrast_dir, showWarnings = FALSE, recursive = TRUE)
+    # Create contrast-specific directory
+    contrast_dir <- file.path(output_dir, "RNAseqAnalysis", clean_contrast)
+    dir.create(contrast_dir, showWarnings = FALSE, recursive = TRUE)
 
-  return(contrast_dir)
+    return(contrast_dir)
+}
+
+# One row per contrast written; saved as RNAseqAnalysis/contrast_manifest.csv.
+contrast_manifest <- data.frame(contrast_name = character(0), folder = character(0),
+                                n_genes = integer(0), n_samples = integer(0),
+                                stringsAsFactors = FALSE)
+
+# Write DEG.csv for one contrast, refusing to overwrite one from this run.
+# n_samples: samples in the groups with a non-zero weight in the contrast.
+write_deg_table <- function(top_results, output_dir, contrast_name, n_samples) {
+    contrast_dir <- create_contrast_dir(output_dir, contrast_name)
+    folder <- basename(contrast_dir)
+    if (exists(tolower(folder), envir = written_contrast_folders, inherits = FALSE)) {
+        stop("Contrast '", contrast_name, "' would overwrite results written earlier in this ",
+             "run to folder '", folder, "'.", call. = FALSE)
+    }
+    assign(tolower(folder), contrast_name, envir = written_contrast_folders)
+    result_file <- file.path(contrast_dir, "DEG.csv")
+    write.csv(top_results, file = result_file, row.names = FALSE)
+    cat("Saved results to:", result_file, "\n")
+    contrast_manifest[nrow(contrast_manifest) + 1, ] <<- list(
+        contrast_name, folder, nrow(top_results), as.integer(n_samples)
+    )
+    result_file
+}
+
+# Number of samples whose group has a non-zero weight in a contrast column.
+samples_in_contrast <- function(weights, groups) {
+    sum(groups %in% rownames(weights)[weights[, 1] != 0])
+}
+
+# --- Contrast checks ----------------------------------------------------------
+# Contrast names and expressions come from an LLM. They are checked here and
+# never pasted into R code: only level names, numbers, + - * / and parentheses
+# may appear in an expression, and the names are passed as list names.
+
+CONTRAST_WEIGHT_TOLERANCE <- 1e-8
+
+# stop() without the call, so the message is on the 'Error:' line.
+fail <- function(...) stop(..., call. = FALSE)
+
+# An R name in an expression. Letters include non-ASCII ones (\p{L}), which
+# make.names keeps in a UTF-8 locale: GSE295568's levels contain "μ".
+# Numbers are not names.
+NAME_PATTERN <- "(?<![\\p{L}\\p{Nd}._])(?:\\p{L}|\\.(?![0-9]))[\\p{L}\\p{Nd}._]*"
+
+expression_identifiers <- function(expr) {
+    m <- gregexpr(NAME_PATTERN, expr, perl = TRUE)
+    unique(regmatches(expr, m)[[1]])
+}
+
+# The expression with every name replaced by a space.
+strip_identifiers <- function(expr) {
+    m <- gregexpr(NAME_PATTERN, expr, perl = TRUE)
+    n <- sum(m[[1]] > 0)
+    if (n > 0) regmatches(expr, m) <- list(rep(" ", n))
+    expr
+}
+
+# Legacy input only: replace raw level text with its make.names form in one
+# left-to-right pass, longest level first, matching whole tokens only.
+# Replaced text is never scanned again, so a short level cannot corrupt a
+# longer one (8h_GM inside X8h_GMTGW).
+rewrite_legacy_expression <- function(expr, mapping) {
+    changed <- mapping[names(mapping) != unname(mapping)]
+    if (length(changed) == 0) return(expr)
+    raws <- names(changed)[order(-nchar(names(changed)))]
+    is_name_char <- function(ch) nzchar(ch) && grepl("[\\p{L}\\p{Nd}._]", ch, perl = TRUE)
+    out <- character(0)
+    i <- 1L
+    n <- nchar(expr)
+    while (i <= n) {
+        hit <- NA_character_
+        if (i == 1L || !is_name_char(substr(expr, i - 1L, i - 1L))) {
+            for (r in raws) {
+                end <- i + nchar(r) - 1L
+                if (end <= n && substr(expr, i, end) == r &&
+                    !is_name_char(substr(expr, end + 1L, end + 1L))) {
+                    hit <- r
+                    break
+                }
+            }
+        }
+        if (!is.na(hit)) {
+            out <- c(out, changed[[hit]])
+            i <- i + nchar(hit)
+        } else {
+            out <- c(out, substr(expr, i, i))
+            i <- i + 1L
+        }
+    }
+    paste(out, collapse = "")
+}
+
+# Check every contrast and return the contrast matrix (levels x contrasts).
+# Stops with a message naming the contrast on any problem.
+build_contrast_matrix <- function(contrast_names, expressions, design_levels, mapping) {
+    bad <- contrast_names[is.na(contrast_names) | make.names(contrast_names) != contrast_names |
+                          contrast_names %in% c("levels", "contrasts")]
+    if (length(bad) > 0) {
+        fail("Contrast name(s) not a valid R name: ", paste0("'", bad, "'", collapse = ", "),
+             ". Use letters, digits and underscores, starting with a letter.")
+    }
+    checked <- character(length(expressions))
+    for (i in seq_along(expressions)) {
+        label <- paste0("Contrast '", contrast_names[i], "' ('", expressions[i], "')")
+        expr <- gsub("`([^`]+)`", "\\1", expressions[i])
+        ids <- expression_identifiers(expr)
+        if (length(ids) == 0 || !all(ids %in% design_levels)) {
+            rewritten <- rewrite_legacy_expression(expr, mapping)
+            if (rewritten != expr) cat("  Legacy rewrite:", expr, " -> ", rewritten, "\n")
+            expr <- rewritten
+        }
+        if (!grepl("^[0-9. +*/()-]*$", strip_identifiers(expr))) {
+            fail(label, ": only level names, numbers, + - * / and parentheses are allowed.")
+        }
+        if (grepl("[\\p{L}\\p{Nd}._][[:space:]]*\\(", expr, perl = TRUE)) {
+            fail(label, ": function calls are not allowed.")
+        }
+        ids <- expression_identifiers(expr)
+        if (length(ids) == 0) fail(label, ": uses no group level.")
+        unknown <- setdiff(ids, design_levels)
+        if (length(unknown) > 0) {
+            fail(label, ": ", paste0("'", unknown, "'", collapse = ", "),
+                 " not a group level. Levels: ", paste(design_levels, collapse = ", "))
+        }
+        parsed <- tryCatch(parse(text = expr, keep.source = FALSE),
+                           error = function(e) fail(label, ": cannot be parsed: ",
+                                                    conditionMessage(e)))
+        if (length(parsed) != 1) fail(label, ": must be a single expression.")
+        checked[i] <- expr
+    }
+    contrast_matrix <- do.call(
+        makeContrasts,
+        c(as.list(setNames(checked, contrast_names)), list(levels = design_levels))
+    )
+    nonfinite <- colnames(contrast_matrix)[colSums(!is.finite(contrast_matrix)) > 0]
+    if (length(nonfinite) > 0) {
+        fail("Contrast(s) ", paste0("'", nonfinite, "'", collapse = ", "),
+             " give non-finite weights. A level whose name is a number can capture a ",
+             "divisor such as '/2'; use valid level names.")
+    }
+    sums <- colSums(contrast_matrix)
+    not_zero_sum <- colnames(contrast_matrix)[abs(sums) > CONTRAST_WEIGHT_TOLERANCE]
+    if (length(not_zero_sum) > 0) {
+        fail("Contrast(s) ", paste0("'", not_zero_sum, "'", collapse = ", "),
+             " have weights that do not sum to 0, so they are not comparisons.")
+    }
+    empty <- colnames(contrast_matrix)[colSums(abs(contrast_matrix)) == 0]
+    if (length(empty) > 0) {
+        fail("Contrast(s) ", paste0("'", empty, "'", collapse = ", "), " have all weights 0.")
+    }
+    contrast_matrix
 }
 
 # Function to export normalized CPM values
@@ -61,6 +258,25 @@ cat("  merged_group =", merged_group, "\n")
 cat("  output_dir =", output_dir, "\n")
 cat("  tx2gene_file =", tx2gene_file, "\n")
 cat("  contrasts_file =", contrasts_file, "\n\n")
+
+# The argument block above is kept verbatim: the download bundle replaces it
+# with fixed values (uorca/gui/components/helpers/__init__.py).
+usage <- "Usage: Rscript RNAseq.R <sample_table.csv> <group_column> <output_dir> <tx2gene.txt|NA> [contrasts.csv]"
+if (length(metadata_file) != 1 || is.na(metadata_file) || !file.exists(metadata_file)) {
+    stop("Sample table not found: '", metadata_file, "'. ", usage)
+}
+if (length(merged_group) != 1 || is.na(merged_group) || !nzchar(merged_group)) {
+    stop("No group column given. ", usage)
+}
+if (length(output_dir) != 1 || is.na(output_dir) || !nzchar(output_dir)) {
+    stop("No output directory given. ", usage)
+}
+if (length(tx2gene_file) != 1 || is.na(tx2gene_file)) {
+    stop("No tx2gene file given (pass NA for none). ", usage)
+}
+if (tx2gene_file != "NA" && !file.exists(tx2gene_file)) {
+    stop("tx2gene file not found: '", tx2gene_file, "'. Pass NA to run without one.")
+}
 
 
 # 1. MDS Plot
@@ -397,7 +613,10 @@ cat("Created analysis directory at:", analysis_dir, "\n")
 
 cat("Step 1: Loading metadata from file...\n")
 cat("Loading metadata from:", metadata_file, "\n")
-metadata <- read.csv(metadata_file, stringsAsFactors = FALSE)
+# check.names = FALSE: headers are used exactly as written (no make.names).
+# na.strings = character(0): a level spelled "NA" stays the string "NA".
+metadata <- read.csv(metadata_file, stringsAsFactors = FALSE, encoding = "UTF-8",
+                     check.names = FALSE, na.strings = character(0))
 if (nrow(metadata) == 0) {
     stop("Metadata is empty!")
 }
@@ -406,24 +625,46 @@ if (!"abundance_file" %in% colnames(metadata)) {
     stop("Metadata must contain an 'abundance_file' column!")
 }
 
-# Sanitize group column values to be valid R names (handles /, spaces, etc.)
-# Store mapping for contrast expression translation
-if (merged_group %in% colnames(metadata)) {
-    original_groups <- unique(metadata[[merged_group]])
-    sanitized_groups <- make.names(original_groups)
-    group_name_mapping <- setNames(sanitized_groups, original_groups)
-
-    # Apply sanitization to the grouping column
-    metadata[[merged_group]] <- make.names(metadata[[merged_group]])
-
-    cat("Sanitized group names for R compatibility:\n")
+# Group levels must reach the design matrix as valid, distinct R names.
+# The UORCA pipeline writes such names (column uorca_group), so nothing is
+# renamed. Older inputs (for example a download bundle of an earlier run) carry
+# raw levels; those are renamed with make.names, but only when no two levels
+# get the same name, which would silently merge two groups.
+if (!merged_group %in% colnames(metadata)) {
+    stop("Group column '", merged_group, "' is not in the sample table. Columns: ",
+         paste(colnames(metadata), collapse = ", "))
+}
+raw_groups <- as.character(metadata[[merged_group]])
+bad_rows <- which(is.na(raw_groups) | raw_groups == "")
+if (length(bad_rows) > 0) {
+    stop("Group column '", merged_group, "' is empty in ", length(bad_rows),
+         " sample(s) (rows ", paste(head(bad_rows, 10), collapse = ", "),
+         "). Every sample needs a group.")
+}
+original_groups <- unique(raw_groups)
+sanitized_groups <- make.names(original_groups)
+collided <- sanitized_groups[duplicated(sanitized_groups)]
+if (length(collided) > 0) {
+    clashes <- vapply(unique(collided), function(r) {
+        paste0("'", r, "' <- ",
+               paste0("'", original_groups[sanitized_groups == r], "'", collapse = " and "))
+    }, character(1))
+    stop("Different group levels get the same R name, so they would be merged ",
+         "into one group: ", paste(clashes, collapse = "; "),
+         ". Give each level a distinct valid R name (the UORCA pipeline writes ",
+         "them to the uorca_group column).")
+}
+group_name_mapping <- setNames(sanitized_groups, original_groups)
+if (identical(sanitized_groups, original_groups)) {
+    cat("Group levels are valid R names; nothing renamed.\n")
+} else {
+    cat("Legacy input: renaming group levels with make.names:\n")
     for (i in seq_along(original_groups)) {
         if (original_groups[i] != sanitized_groups[i]) {
             cat("  ", original_groups[i], " -> ", sanitized_groups[i], "\n")
         }
     }
-} else {
-    group_name_mapping <- NULL
+    metadata[[merged_group]] <- unname(group_name_mapping[raw_groups])
 }
 
 # Load tx2gene mapping if provided
@@ -443,16 +684,36 @@ if (tx2gene_file != "NA" && file.exists(tx2gene_file)) {
     use_tx2gene <- FALSE
 }
 
+# Name each sample, so that the DGEList and CPM.csv use sample IDs instead of the
+# DGEList() defaults Sample1..N. The rule is the same as in
+# uorca/gui/sample_names.py: the first of geo_accession, GSM and SRR whose values
+# are all present and unique. With none of them, the defaults stay.
+sample_ids_for_rows <- function(metadata) {
+    for (col in c("geo_accession", "GSM", "SRR")) {
+        if (col %in% colnames(metadata)) {
+            ids <- trimws(as.character(metadata[[col]]))
+            if (!any(is.na(ids) | ids == "") && !anyDuplicated(ids)) {
+                cat("Naming samples by the '", col, "' column\n", sep = "")
+                return(ids)
+            }
+        }
+    }
+    cat("No unique sample ID column; samples keep the names Sample1..N\n")
+    paste0("Sample", seq_len(nrow(metadata)))
+}
+abundance_files <- metadata$abundance_file
+names(abundance_files) <- sample_ids_for_rows(metadata)
+
 cat("Step 3: Importing Kallisto quantification data using tximport...\n")
 cat("Importing Kallisto quantification data...\n")
 if (use_tx2gene) {
-    kallisto <- tximport(metadata$abundance_file,
+    kallisto <- tximport(abundance_files,
         type = "kallisto",
         tx2gene = tx2gene, countsFromAbundance = "lengthScaledTPM",
         ignoreAfterBar = TRUE
     )
 } else {
-    kallisto <- tximport(metadata$abundance_file,
+    kallisto <- tximport(abundance_files,
         type = "kallisto",
         txOut = TRUE, ignoreAfterBar = TRUE
     )
@@ -471,11 +732,12 @@ DGE$samples$group <- NULL
 DGE$samples <- cbind(DGE$samples, metadata)
 
 
-group_data <- DGE$samples[[merged_group]]
-
-# Sanitize group names to valid R names (handles SARS-CoV-2 -> SARS.CoV.2, etc.)
-group_data <- make.names(group_data)
-DGE$samples[[merged_group]] <- group_data
+group_data <- as.character(DGE$samples[[merged_group]])
+# The levels were checked (and, for legacy input, renamed) above.
+if (!identical(make.names(group_data), group_data)) {
+    stop("Internal error: group levels are not valid R names after the check: ",
+         paste(unique(group_data[make.names(group_data) != group_data]), collapse = ", "))
+}
 
 # Filter genes with low expression
 keep.exprs <- filterByExpr(DGE, group = group_data)
@@ -496,8 +758,16 @@ plot_normalization(DGE_filtered, DGE.norm, output_dir)
 
 cat("Step 6: Generating design matrix using grouping column:", merged_group, "\n")
 cat("Creating design matrix using grouping column:", merged_group, "\n")
-design <- model.matrix(as.formula(paste("~0 +", merged_group)), data = DGE.norm$samples)
-colnames(design) <- sub(merged_group, "", colnames(design))
+# Build the factor directly: no formula is pasted from the column name and no
+# regex strips it from the column names. factor() orders levels as
+# model.matrix would for a character column, so the design is unchanged.
+group_factor <- factor(as.character(DGE.norm$samples[[merged_group]]))
+if (nlevels(group_factor) < 2) {
+    stop("The group column '", merged_group, "' has ", nlevels(group_factor),
+         " level(s); differential expression needs at least 2.")
+}
+design <- model.matrix(~0 + group_factor)
+colnames(design) <- levels(group_factor)
 
 plot_mds(DGE.norm, output_dir, labels_column = "geo_accession")
 
@@ -511,70 +781,27 @@ v <- voom(DGE.norm,
 cat("Step 8: Fitting linear model with limma...\n")
 cat("Fitting linear model...\n")
 
-# Check if we have a contrasts file to use
+# Read the contrasts file, if one was given
 custom_contrast_matrix <- NULL
-if (!is.null(contrasts_file) && file.exists(contrasts_file)) {
+if (!is.null(contrasts_file)) {
+    if (!file.exists(contrasts_file)) {
+        stop("Contrasts file not found: ", contrasts_file)
+    }
     cat("Loading custom contrasts from CSV file:", contrasts_file, "\n")
-
-    # Read the CSV file containing contrasts
-    contrasts_df <- try(read.csv(contrasts_file, stringsAsFactors = FALSE))
-
-    # Sanitize group names in contrast expressions using the mapping we created earlier
-    # This ensures contrast expressions match the sanitized column names in the design matrix
-    if (class(contrasts_df) != "try-error" && "expression" %in% colnames(contrasts_df) && !is.null(group_name_mapping)) {
-        cat("Sanitizing contrast expressions using group name mapping...\n")
-
-        for (i in seq_len(nrow(contrasts_df))) {
-            expr <- contrasts_df$expression[i]
-            original_expr <- expr
-
-            # Remove backticks first
-            expr <- gsub("`([^`]+)`", "\\1", expr)
-
-            # Replace original group names with sanitized versions
-            # Sort by length (longest first) to avoid partial replacements
-            sorted_originals <- names(group_name_mapping)[order(-nchar(names(group_name_mapping)))]
-            for (orig in sorted_originals) {
-                sanitized <- group_name_mapping[[orig]]
-                if (orig != sanitized) {
-                    # Literal (fixed) replacement: group names contain spaces,
-                    # parens, slashes etc. that are unsafe to feed to a regex.
-                    expr <- gsub(orig, sanitized, expr, fixed = TRUE)
-                }
-            }
-
-            contrasts_df$expression[i] <- expr
-            if (original_expr != expr) {
-                cat("  Contrast", i, ":", original_expr, " -> ", expr, "\n")
-            }
-        }
-        cat("Sanitized contrast expressions for R compatibility\n")
+    contrasts_df <- read.csv(contrasts_file, stringsAsFactors = FALSE, check.names = FALSE,
+                             encoding = "UTF-8",
+                             na.strings = character(0), colClasses = "character")
+    if (!all(c("name", "expression") %in% colnames(contrasts_df)) || nrow(contrasts_df) == 0) {
+        stop("Contrasts file ", contrasts_file, " needs 'name' and 'expression' columns and ",
+             "at least one row; found columns: ", paste(colnames(contrasts_df), collapse = ", "))
     }
-
-    if (class(contrasts_df) != "try-error" && nrow(contrasts_df) > 0 &&
-        all(c("name", "expression") %in% colnames(contrasts_df))) {
-
-        cat("Loaded", nrow(contrasts_df), "contrasts from CSV file\n")
-
-        # Extract unique factor levels from expressions
-        levels_df <- unique(unlist(strsplit(contrasts_df$expression, " - ")))
-
-        # Generate the makeContrasts call
-        contrast_parts <- paste0(contrasts_df$name, " = \"", contrasts_df$expression, "\"")
-        contrasts_str <- paste(contrast_parts, collapse = ", ")
-        levels_str <- paste(paste0("\"", levels_df, "\""), collapse = ", ")
-        makeContrasts_str <- paste0("makeContrasts(", contrasts_str, ", levels = colnames(design))")
-
-        cat("Generated makeContrasts call:\n", makeContrasts_str, "\n\n")
-
-        # Create the contrast matrix
-        custom_contrast_matrix <- eval(parse(text = makeContrasts_str))
-
-        cat("Custom contrast matrix:\n")
-        print(custom_contrast_matrix)
-    } else {
-        warning("Failed to read contrasts from CSV file or invalid format")
-    }
+    cat("Loaded", nrow(contrasts_df), "contrasts from CSV file\n")
+    custom_contrast_matrix <- build_contrast_matrix(
+        contrasts_df$name, contrasts_df$expression, colnames(design), group_name_mapping
+    )
+    cat("Custom contrast matrix:\n")
+    print(custom_contrast_matrix)
+    check_contrast_folders(output_dir, colnames(custom_contrast_matrix))
 }
 
 if (!is.null(custom_contrast_matrix)) {
@@ -599,62 +826,43 @@ if (!is.null(custom_contrast_matrix)) {
         top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
 
         # Save results in the contrast-specific directory
-        contrast_name <- colnames(custom_contrast_matrix)[i]
-        contrast_dir <- create_contrast_dir(output_dir, contrast_name)
-        result_file <- file.path(contrast_dir, "DEG.csv")
-        write.csv(top_results, file = result_file, row.names = FALSE)
-        cat("Saved results to:", result_file, "\n")
+        write_deg_table(top_results, output_dir, contrast_name,
+                        samples_in_contrast(custom_contrast_matrix[, i, drop = FALSE], group_data))
     }
 } else {
-    # Fall back to default behavior
-    if (ncol(design) == 2) {
-        cat("Exactly two groups detected. Calculating contrast (group2 - group1)...\n")
-        contrast_name <- paste(colnames(design)[2], "-", colnames(design)[1])
-        contrast <- makeContrasts(diff = contrast_name, levels = design)
-        cat("Contrast matrix:")
-        print(contrast)
-        vfit <- lmFit(v, design)
-        vfit <- contrasts.fit(vfit, contrast)
-        efit <- eBayes(vfit)
-        dt <- decideTests(efit, p.value = 0.05)
-        save_voom_plot(DGE.norm, efit, design, output_dir)
-        plot_ma(efit, output_dir, coef = 1, status = dt)
-        plot_volcano(efit, output_dir, coef = 1, highlight = 10)
-        plot_deg_heatmap(DGE.norm, efit, output_dir, group_data, coef = 1, n_genes = 50)
-
-        cat("Top differential expression results for contrast:\n")
-        top_results <- topTable(efit, number = Inf)
-        print(head(top_results))
-        top_results$Gene <- rownames(top_results)
-        top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
-        print(head(top_results))
-
-        # Save in contrast-specific directory
-        contrast_name <- colnames(design)[2] + "_vs_" + colnames(design)[1]
-        contrast_dir <- create_contrast_dir(output_dir, contrast_name)
-        write.csv(top_results, file = file.path(contrast_dir, "DEG.csv"), row.names = FALSE)
-    } else {
-        cat("Multiple groups detected. Generating top results for each coefficient...\n")
-        for (i in 1:ncol(design)) {
-            vfit <- lmFit(v, design)
-            efit <- eBayes(vfit)
-            coef_name <- colnames(design)[i]
-            dt <- decideTests(efit, p.value = 0.05)[, i]
-            save_voom_plot(DGE.norm, efit, design, output_dir)
-            plot_ma(efit, output_dir, coef = 1, status = dt)
-            plot_volcano(efit, output_dir, coef = 1, highlight = 10)
-            plot_deg_heatmap(DGE.norm, efit, output_dir, group_data, coef = 1, n_genes = 50)
-            top_results <- topTable(efit, coef = i, number = Inf)
-
-            top_results$Gene <- rownames(top_results)
-            top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
-            print(head(top_results))
-
-            # Save in contrast-specific directory
-            contrast_dir <- create_contrast_dir(output_dir, coef_name)
-            write.csv(top_results, file = file.path(contrast_dir, "DEG.csv"), row.names = FALSE)
-        }
+    # No contrasts file. The UORCA pipeline always writes one; this branch is
+    # for a download bundle of an older run without contrasts. Only a
+    # two-group design has an unambiguous comparison. The former multi-group
+    # branch tested each group mean against zero, which is not a comparison,
+    # so it now stops.
+    if (ncol(design) != 2) {
+        stop("No contrasts file was given and the design has ", ncol(design),
+             " groups (", paste(colnames(design), collapse = ", "), "). ",
+             "Provide a contrasts file with 'name' and 'expression' columns.")
     }
+    contrast_name <- paste0(colnames(design)[2], "_vs_", colnames(design)[1])
+    cat("Exactly two groups and no contrasts file. Contrast:", contrast_name, "\n")
+    contrast <- build_contrast_matrix(
+        contrast_name, paste(colnames(design)[2], "-", colnames(design)[1]),
+        colnames(design), group_name_mapping
+    )
+    check_contrast_folders(output_dir, contrast_name)
+    print(contrast)
+    vfit <- lmFit(v, design)
+    vfit <- contrasts.fit(vfit, contrast)
+    efit <- eBayes(vfit)
+    dt <- decideTests(efit, p.value = 0.05)
+    save_voom_plot(DGE.norm, efit, design, output_dir)
+    plot_ma(efit, output_dir, coef = 1, status = dt)
+    plot_volcano(efit, output_dir, coef = 1, highlight = 10)
+    plot_deg_heatmap(DGE.norm, efit, output_dir, group_data, coef = 1, n_genes = 50)
+
+    top_results <- topTable(efit, number = Inf)
+    top_results$Gene <- rownames(top_results)
+    top_results <- top_results[, c("Gene", setdiff(names(top_results), "Gene"))]
+    print(head(top_results))
+    write_deg_table(top_results, output_dir, contrast_name,
+                    samples_in_contrast(contrast, group_data))
 }
 
 cat("Step 9: Saving DEG results, normalized DGEList, and CPM values...\n")
@@ -663,5 +871,11 @@ saveRDS(DGE.norm, file = file.path(analysis_dir, "DGE_norm.RDS"))
 
 # Export CPM values
 export_cpm(DGE.norm, output_dir)
+
+# Record what was written and with which packages
+manifest_file <- file.path(analysis_dir, "contrast_manifest.csv")
+write.csv(contrast_manifest, file = manifest_file, row.names = FALSE)
+cat("Saved contrast manifest to:", manifest_file, "\n")
+writeLines(capture.output(sessionInfo()), file.path(analysis_dir, "sessionInfo.txt"))
 
 cat("=== R Script: edgeR/limma Analysis Completed ===\n")
