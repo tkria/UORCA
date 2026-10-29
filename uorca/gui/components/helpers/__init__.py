@@ -46,6 +46,9 @@ from .ai_agent_tool_logger import (
 
 logger = logging.getLogger(__name__)
 
+# Written into a dataset package when a selected part could not be made.
+PACKAGE_WARNINGS_FILE = "PACKAGE_WARNINGS.txt"
+
 
 class ModuleFilter(logging.Filter):
     """Filter for logging modules."""
@@ -607,9 +610,10 @@ def create_dataset_download_package(
                     add_directory_to_zip(zf, abundance_dir, f"{package_name}/abundance")
             
             # 3. Add QC plots (if selected)
+            package_warnings: List[str] = []
             if components.get('qc_plots', True):
                 include_pdfs = components.get('include_pdfs', False)
-                _add_qc_plots_to_zip(zf, ri, dataset_id, dataset_path, package_name, include_pdfs)
+                package_warnings += _add_qc_plots_to_zip(zf, ri, dataset_id, dataset_path, package_name, include_pdfs)
             
             # 4. Add DEG analysis data and plots (if selected)
             if components.get('deg_analysis', True):
@@ -636,6 +640,10 @@ def create_dataset_download_package(
                 except Exception as e:
                     logger.warning(f"Failed to add R script bundle: {e}")
 
+            if package_warnings:
+                # The Analyses tab shows this file's content after the build.
+                zf.writestr(f"{package_name}/{PACKAGE_WARNINGS_FILE}", "\n".join(package_warnings) + "\n")
+
             # 6. Create and add README (always include, but customize content)
             readme_content = _generate_dataset_readme(ri, dataset_id, dataset_accession, components)
             zf.writestr(f"{package_name}/README.txt", readme_content)
@@ -656,8 +664,9 @@ def _add_qc_plots_to_zip(
     dataset_path: str,
     package_name: str,
     include_pdfs: bool = False
-):
-    """Add QC plots to the ZIP package."""
+) -> List[str]:
+    """Add QC plots to the ZIP package. Returns a message for each plot that could not be made."""
+    problems: List[str] = []
     rnaseq_dir = os.path.join(dataset_path, "RNAseqAnalysis")
     
     # Static QC plots (always include PNGs)
@@ -675,23 +684,35 @@ def _add_qc_plots_to_zip(
             with open(source_path, 'rb') as f:
                 zf.writestr(f"{package_name}/QC_plots/{dest_file}", f.read())
     
-    # Only generate PCA plot PDF if requested and data available
+    # Sample structure PDFs (PCA and clustering heatmap), as on the Analyses tab
     if include_pdfs and dataset_id in ri.cpm_data:
         try:
-            # Import only if needed
-            from uorca.gui.single_analysis_plots import create_pca_plot, load_sample_groups
+            from uorca.gui.single_analysis_plots import load_sample_groups, load_sample_titles
+            from uorca.gui.sample_structure import (
+                create_clustering_heatmap, create_pca_figure, group_display, known_groups, run_pca,
+                sample_group_series, top_variable_genes,
+            )
 
             cpm_df = ri.cpm_data[dataset_id]
             analysis_info = ri.analysis_info.get(dataset_id)
-            groups = load_sample_groups(ri.results_dir, dataset_id, cpm_df, analysis_info)
-            
-            pca_fig = create_pca_plot(cpm_df, groups)
-            if pca_fig:
-                pdf_bytes = plotly_fig_to_pdf_bytes(pca_fig, width=1200, height=800, scale=2)
+            groups = known_groups(load_sample_groups(ri.results_dir, dataset_id, cpm_df, analysis_info))
+            titles = load_sample_titles(ri.results_dir, dataset_id)
+            selection = top_variable_genes(cpm_df)
+            display = group_display(sample_group_series(list(selection.matrix.columns), groups).tolist())
+            figures = {
+                "PCA_plot.pdf": (create_pca_figure(run_pca(selection.matrix), groups, display, titles), 800),
+                "sample_clustering_heatmap.pdf": (create_clustering_heatmap(selection, groups, display, titles), 1100),
+            }
+            for name, (fig, height) in figures.items():
+                pdf_bytes = plotly_fig_to_pdf_bytes(fig, width=1200, height=height, scale=2)
                 if pdf_bytes:
-                    zf.writestr(f"{package_name}/QC_plots/PCA_plot.pdf", pdf_bytes)
+                    zf.writestr(f"{package_name}/QC_plots/{name}", pdf_bytes)
+                else:
+                    problems.append(f"QC_plots/{name} was not made: PDF export failed (is Kaleido installed?)")
         except Exception as e:
-            logger.debug(f"Could not generate PCA plot PDF: {e}")
+            logger.exception(f"Could not generate sample structure PDFs for {dataset_id}")
+            problems.append(f"QC_plots/PCA_plot.pdf and sample_clustering_heatmap.pdf were not made: {type(e).__name__}: {e}")
+    return problems
 
 
 def _add_deg_analysis_to_zip(
@@ -731,7 +752,7 @@ def _add_deg_analysis_to_zip(
             # Only generate interactive plot PDFs if requested
             if include_pdfs:
                 try:
-                    from uorca.gui.single_analysis_plots import create_volcano_plot, create_ma_plot, create_deg_heatmap, load_sample_groups
+                    from uorca.gui.single_analysis_plots import create_volcano_plot, create_ma_plot
 
                     # Volcano plot PDF
                     volcano_fig = create_volcano_plot(deg_df)
@@ -747,18 +768,6 @@ def _add_deg_analysis_to_zip(
                         if pdf_bytes:
                             zf.writestr(f"{contrast_dir}/ma_plot.pdf", pdf_bytes)
                     
-                    # Heatmap PDF (if CPM data available)
-                    if dataset_id in ri.cpm_data:
-                        cpm_df = ri.cpm_data[dataset_id]
-                        analysis_info = ri.analysis_info.get(dataset_id)
-                        groups = load_sample_groups(ri.results_dir, dataset_id, cpm_df, analysis_info)
-                        
-                        heatmap_fig = create_deg_heatmap(cpm_df, deg_df, groups)
-                        if heatmap_fig:
-                            pdf_bytes = plotly_fig_to_pdf_bytes(heatmap_fig, width=1200, height=1000, scale=2)
-                            if pdf_bytes:
-                                zf.writestr(f"{contrast_dir}/heatmap.pdf", pdf_bytes)
-                                
                 except Exception as e:
                     logger.debug(f"Could not generate interactive plot PDFs for {contrast_id}: {e}")
 
@@ -821,7 +830,8 @@ def _generate_dataset_readme(
     if components.get('qc_plots', False):
         readme_lines.extend([
             f"{section_num}. QC_plots/",
-            "   - PCA_plot.pdf: Principal component analysis (if PDF option selected)",
+            "   - PCA_plot.pdf: PCA of the top 500 variable genes (if PDF option selected)",
+            "   - sample_clustering_heatmap.pdf: Clustering of the top 500 variable genes (if PDF option selected)",
             "   - MDS.png: Multi-dimensional scaling plot",
             "   - filtering_density.png: Gene expression filtering results",
             "   - normalization_boxplots.png: Before/after normalization",
@@ -839,7 +849,7 @@ def _generate_dataset_readme(
             "     * DEG_results.csv: Differential expression statistics",
             "     * volcano_plot.pdf/png: Volcano plot visualization",
             "     * ma_plot.pdf/png: MA plot visualization",
-            "     * heatmap.pdf/png: Top 50 DEGs heatmap",
+            "     * heatmap_top50.png: Top 50 DEGs heatmap from the R pipeline",
             ""
         ])
     

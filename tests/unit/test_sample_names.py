@@ -128,13 +128,3 @@ def test_literal_na_string_is_an_id_as_in_r(tmp_path):
     _table(geo_accession=["GSM1", "NA"], SRR=["SRR1", "SRR2"]).to_csv(path)
     assert sample_ids(read_sample_table(str(path))) == ["GSM1", "NA"]
 
-
-def test_pca_plot_renders_with_groups_and_titles():
-    from uorca.gui.single_analysis_plots import create_pca_plot
-
-    cpm = pd.DataFrame({"Gene": [f"G{i}" for i in range(5)],
-                        "GSM1": [1.0, 2, 3, 4, 5], "GSM2": [2.0, 1, 4, 3, 6], "GSM3": [5.0, 4, 3, 2, 1]})
-    groups = pd.Series({"GSM1": "A", "GSM2": "A"})  # GSM3 has no known group
-    fig = create_pca_plot(cpm, groups, sample_titles=pd.Series({"GSM1": "t1", "GSM2": "t2", "GSM3": "t3"}))
-    names = {t.name: list(t.hovertext) for t in fig.data}
-    assert names == {"A": ["GSM1", "GSM2"], "GSM3": ["GSM3"]}

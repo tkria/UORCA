@@ -251,7 +251,7 @@ def _render_tab_descriptions():
 
         **Plot Gene Expression** - Generate boxplots displaying gene expression distributions across sample groups
 
-        **View Dataset Analyses** - Explore quality control and differential expression plots for individual datasets. View PCA plots, volcano plots, MA plots, and DEG heatmaps
+        **View Dataset Analyses** - Explore quality control and differential expression plots for individual datasets. View sample structure (PCA, clustering heatmap, MDS), volcano plots and MA plots
 
         **View Dataset Info** - Browse dataset information including study titles, summaries, experimental designs, and organism information
 
