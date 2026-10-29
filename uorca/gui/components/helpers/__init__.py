@@ -675,23 +675,31 @@ def _add_qc_plots_to_zip(
             with open(source_path, 'rb') as f:
                 zf.writestr(f"{package_name}/QC_plots/{dest_file}", f.read())
     
-    # Only generate PCA plot PDF if requested and data available
+    # Sample structure PDFs (PCA and clustering heatmap), as on the Analyses tab
     if include_pdfs and dataset_id in ri.cpm_data:
         try:
-            # Import only if needed
-            from uorca.gui.single_analysis_plots import create_pca_plot, load_sample_groups
+            from uorca.gui.single_analysis_plots import load_sample_groups, load_sample_titles
+            from uorca.gui.sample_structure import (
+                create_clustering_heatmap, create_pca_figure, group_display, run_pca,
+                sample_group_series, top_variable_genes,
+            )
 
             cpm_df = ri.cpm_data[dataset_id]
             analysis_info = ri.analysis_info.get(dataset_id)
             groups = load_sample_groups(ri.results_dir, dataset_id, cpm_df, analysis_info)
-            
-            pca_fig = create_pca_plot(cpm_df, groups)
-            if pca_fig:
-                pdf_bytes = plotly_fig_to_pdf_bytes(pca_fig, width=1200, height=800, scale=2)
+            titles = load_sample_titles(ri.results_dir, dataset_id)
+            selection = top_variable_genes(cpm_df)
+            display = group_display(sample_group_series(list(selection.matrix.columns), groups).tolist())
+            figures = {
+                "PCA_plot.pdf": (create_pca_figure(run_pca(selection.matrix), groups, display, titles), 800),
+                "sample_clustering_heatmap.pdf": (create_clustering_heatmap(selection, groups, display, titles), 1100),
+            }
+            for name, (fig, height) in figures.items():
+                pdf_bytes = plotly_fig_to_pdf_bytes(fig, width=1200, height=height, scale=2)
                 if pdf_bytes:
-                    zf.writestr(f"{package_name}/QC_plots/PCA_plot.pdf", pdf_bytes)
+                    zf.writestr(f"{package_name}/QC_plots/{name}", pdf_bytes)
         except Exception as e:
-            logger.debug(f"Could not generate PCA plot PDF: {e}")
+            logger.warning(f"Could not generate sample structure PDFs for {dataset_id}: {e}")
 
 
 def _add_deg_analysis_to_zip(
@@ -731,7 +739,7 @@ def _add_deg_analysis_to_zip(
             # Only generate interactive plot PDFs if requested
             if include_pdfs:
                 try:
-                    from uorca.gui.single_analysis_plots import create_volcano_plot, create_ma_plot, create_deg_heatmap, load_sample_groups
+                    from uorca.gui.single_analysis_plots import create_volcano_plot, create_ma_plot
 
                     # Volcano plot PDF
                     volcano_fig = create_volcano_plot(deg_df)
@@ -747,18 +755,6 @@ def _add_deg_analysis_to_zip(
                         if pdf_bytes:
                             zf.writestr(f"{contrast_dir}/ma_plot.pdf", pdf_bytes)
                     
-                    # Heatmap PDF (if CPM data available)
-                    if dataset_id in ri.cpm_data:
-                        cpm_df = ri.cpm_data[dataset_id]
-                        analysis_info = ri.analysis_info.get(dataset_id)
-                        groups = load_sample_groups(ri.results_dir, dataset_id, cpm_df, analysis_info)
-                        
-                        heatmap_fig = create_deg_heatmap(cpm_df, deg_df, groups)
-                        if heatmap_fig:
-                            pdf_bytes = plotly_fig_to_pdf_bytes(heatmap_fig, width=1200, height=1000, scale=2)
-                            if pdf_bytes:
-                                zf.writestr(f"{contrast_dir}/heatmap.pdf", pdf_bytes)
-                                
                 except Exception as e:
                     logger.debug(f"Could not generate interactive plot PDFs for {contrast_id}: {e}")
 
@@ -821,7 +817,8 @@ def _generate_dataset_readme(
     if components.get('qc_plots', False):
         readme_lines.extend([
             f"{section_num}. QC_plots/",
-            "   - PCA_plot.pdf: Principal component analysis (if PDF option selected)",
+            "   - PCA_plot.pdf: PCA of the top 500 variable genes (if PDF option selected)",
+            "   - sample_clustering_heatmap.pdf: Clustering of the top 500 variable genes (if PDF option selected)",
             "   - MDS.png: Multi-dimensional scaling plot",
             "   - filtering_density.png: Gene expression filtering results",
             "   - normalization_boxplots.png: Before/after normalization",
@@ -839,7 +836,7 @@ def _generate_dataset_readme(
             "     * DEG_results.csv: Differential expression statistics",
             "     * volcano_plot.pdf/png: Volcano plot visualization",
             "     * ma_plot.pdf/png: MA plot visualization",
-            "     * heatmap.pdf/png: Top 50 DEGs heatmap",
+            "     * heatmap_top50.png: Top 50 DEGs heatmap from the R pipeline",
             ""
         ])
     
