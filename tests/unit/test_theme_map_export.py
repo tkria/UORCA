@@ -623,6 +623,8 @@ def _run_page_script(document: str, tmp_path: Path) -> dict:
         ],
         capture_output=True,
         text=True,
+        # node writes UTF-8; without this, Windows decodes with its ANSI code page.
+        encoding="utf-8",
         timeout=60,
     )
     assert completed.returncode == 0, completed.stderr

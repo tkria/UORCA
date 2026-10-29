@@ -47,7 +47,8 @@ def test_mcp_server_script_path_exists(monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-    monkeypatch.setattr(agent_factory, "MCPServerStdio", FakeMCPServer)
+    # create_uorca_agent imports MCPServerStdio inside the function, so patch its source.
+    monkeypatch.setattr("pydantic_ai.mcp.MCPServerStdio", FakeMCPServer)
     monkeypatch.setattr(agent_factory, "Agent", FakeAgent)
 
     create = getattr(

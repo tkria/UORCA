@@ -19,6 +19,7 @@ def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
     monkeypatch.setenv("HOME", str(h))
+    monkeypatch.setenv("USERPROFILE", str(h))  # Path.home() reads USERPROFILE on Windows
     assert Path.home() == h
     return h
 

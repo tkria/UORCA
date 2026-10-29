@@ -34,11 +34,5 @@ def test_ai_tab_import_does_not_load_mcp_server():
 
 
 @pytest.mark.unit
-@pytest.mark.xfail(
-    reason="uorca/gui/ai/agent_factory.py imports pydantic_ai.mcp at module level; "
-           "moved into create_uorca_agent() on branch fix/windows-install-and-ci (7c55e76). "
-           "Remove this marker once that branch is merged.",
-    strict=True,
-)
 def test_ai_tab_import_does_not_load_mcp_package():
     assert _loaded_after_import("mcp") == ""
