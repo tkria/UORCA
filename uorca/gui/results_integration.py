@@ -255,6 +255,12 @@ def build_group_labels(groups: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, str
     return labels
 
 
+def _accession_sort_key(accession: str) -> Tuple[str, int, str]:
+    """GSE2 before GSE10: sort by prefix, then number, then the full text."""
+    m = re.match(r"([A-Za-z]*)(\d+)", accession)
+    return (m.group(1), int(m.group(2)), accession) if m else (accession, -1, accession)
+
+
 def _accession_blocks(column_accessions: Sequence[str]) -> List[Tuple[str, int, int]]:
     """Runs of equal accessions as (accession, first index, last index)."""
     blocks: List[Tuple[str, int, int]] = []
@@ -1050,7 +1056,12 @@ class ResultsIntegrator:
                 return list(columns)
             return [columns[i] for i in order]
 
-        block_accessions = list(dict.fromkeys(label_to_accession[c] for c in heatmap_df.columns))
+        # Blocks in accession-number order, so the same selection always draws
+        # the datasets in the same order (the contrast order can vary).
+        block_accessions = sorted(
+            dict.fromkeys(label_to_accession[c] for c in heatmap_df.columns),
+            key=_accession_sort_key,
+        )
         if len(block_accessions) > 1:
             clustered_contrasts = []
             for acc in block_accessions:
