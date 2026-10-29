@@ -1010,6 +1010,27 @@ def _load_results_for_panel(run_dir: str) -> pd.DataFrame | None:
     return pd.read_csv(csv_path)
 
 
+def build_refusal() -> str | None:
+    """Why a theme map cannot be built now, or ``None`` when it can.
+
+    The same check the build runs first (:func:`embed.check_provider`): the selected AI
+    provider must be OpenAI and ``OPENAI_API_KEY`` must be set. Running it before the
+    page offers a build means the user is never asked to confirm a spend that would
+    be refused.
+    """
+    from uorca.identification.theme_map import embed as embed_module
+
+    try:
+        embed_module.check_provider()
+    except embed_module.ThemeMapProviderError as exc:
+        return str(exc)
+    return None
+
+
+def _render_build_refusal(refusal: str) -> None:
+    st.warning(f"A theme map cannot be built for this run. {refusal}")
+
+
 def _render_build_prompt(run: Any, run_dir: str, results: pd.DataFrame | None) -> None:
     """State 2 of spec 9.7: no map yet, so offer to build one and price it first."""
     run_id = str(getattr(run, "id", "run"))
@@ -1019,6 +1040,11 @@ def _render_build_prompt(run: Any, run_dir: str, results: pd.DataFrame | None) -
         "by theme, so you can see which kinds of study the query returned — including "
         "categories the scored table never surfaced."
     )
+
+    refusal = build_refusal()
+    if refusal is not None:
+        _render_build_refusal(refusal)
+        return
 
     if results is None:
         st.info(
@@ -1073,6 +1099,11 @@ def _render_failure(run: Any, run_dir: str, message: str) -> None:
     st.error(f"The last theme map build for this run failed:\n\n```\n{message}\n```")
 
     if _render_task_status(run_id):
+        return
+
+    refusal = build_refusal()
+    if refusal is not None:
+        _render_build_refusal(refusal)
         return
 
     if st.button("Rebuild theme map", type="primary", key=f"theme_map_rebuild_{run_id}"):
@@ -1308,6 +1339,10 @@ def render_theme_map_panel(run: Any) -> None:
         return
     except ThemeMapArtifactError as exc:
         st.error(f"The theme map artifacts for this run cannot be read: {exc}")
+        refusal = build_refusal()
+        if refusal is not None:
+            _render_build_refusal(refusal)
+            return
         if st.button(
             "Rebuild theme map", type="primary", key=f"theme_map_repair_{getattr(run, 'id', 'run')}"
         ):

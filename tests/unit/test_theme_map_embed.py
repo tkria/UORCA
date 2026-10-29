@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -85,6 +86,22 @@ class _FakeClient:
         self.embeddings = _FakeEmbeddings(vectors_by_text, dim)
 
 
+@pytest.fixture(autouse=True)
+def _no_user_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+    """Never read the developer's ~/.uorca/config.yaml; provider env vars start unset."""
+    from uorca import ai_provider
+
+    for name in ("UORCA_AI_PROVIDER", "UORCA_OPENAI_MODEL", "UORCA_AZURE_DEPLOYMENT",
+                 "UORCA_OPENAI_COMPATIBLE_BASE_URL", "UORCA_OPENAI_COMPATIBLE_MODEL",
+                 "UORCA_OPENAI_COMPATIBLE_API_KEY_ENV", "AZURE_OPENAI_ENDPOINT",
+                 "OPENAI_API_VERSION"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ai_provider, "CONFIG_PATH", tmp_path / "config.yaml")
+    ai_provider._load_ai_config.cache_clear()
+    yield
+    ai_provider._load_ai_config.cache_clear()
+
+
 @pytest.fixture
 def openai_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force the OpenAI provider and a present key, independent of the local config file.
@@ -119,6 +136,68 @@ def test_check_provider_raises_on_bedrock(monkeypatch: pytest.MonkeyPatch) -> No
     # The message must name the config key the user has to change (spec section 7).
     assert "ai_provider.provider" in message
     assert "UORCA_AI_PROVIDER" in message
+
+
+@pytest.mark.parametrize(
+    ("setting", "provider"),
+    [
+        ("bedrock:us.anthropic.claude-x-v1:0", "bedrock"),
+        ("anthropic:claude-sonnet-4-5", "anthropic"),
+        ("google-gla:gemini-2.5-flash", "google-gla"),
+        ("groq:llama-3.3-70b-versatile", "groq"),
+        ("mistral:mistral-small-latest", "mistral"),
+        ("cohere:command-r-plus", "cohere"),
+    ],
+)
+def test_check_provider_raises_on_any_non_openai_model_string(
+    monkeypatch: pytest.MonkeyPatch, setting: str, provider: str
+) -> None:
+    """Text must never go to OpenAI embeddings when another provider is selected."""
+    monkeypatch.setenv("UORCA_AI_PROVIDER", setting)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+    factory = _ExplodingClientFactory()
+    monkeypatch.setattr(embed_module, "_make_client", factory)
+
+    with pytest.raises(ThemeMapProviderError, match=f"configured AI provider is '{provider}'"):
+        embed_texts(["some text"])
+    assert factory.calls == 0
+
+
+def test_check_provider_raises_on_azure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UORCA_AI_PROVIDER", "azure")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://r.openai.azure.com")
+    monkeypatch.setenv("OPENAI_API_VERSION", "2024-10-21")
+    monkeypatch.setenv("UORCA_AZURE_DEPLOYMENT", "dep")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+
+    with pytest.raises(ThemeMapProviderError, match="'azure'"):
+        check_provider()
+
+
+def test_check_provider_raises_on_openai_compatible(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UORCA_AI_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("UORCA_OPENAI_COMPATIBLE_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("UORCA_OPENAI_COMPATIBLE_MODEL", "qwen3:8b")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+
+    with pytest.raises(ThemeMapProviderError, match="'openai_compatible'"):
+        check_provider()
+
+
+def test_check_provider_raises_on_invalid_provider_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UORCA_AI_PROVIDER", "typo")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+
+    with pytest.raises(ThemeMapProviderError, match="Unknown AI provider 'typo'"):
+        check_provider()
+
+
+def test_check_provider_accepts_openai_model_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UORCA_AI_PROVIDER", "openai:gpt-5")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+    assert check_provider() is None
 
 
 def test_check_provider_raises_before_a_client_is_constructed(

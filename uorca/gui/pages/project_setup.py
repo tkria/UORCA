@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -10,6 +11,8 @@ import streamlit as st
 
 from uorca.ai_provider import (
     DEFAULT_OPENAI_MODEL,
+    UORCA_AI_PROVIDER,
+    ProviderConfigError,
     _load_ai_config,
     get_model_name,
     save_ai_config,
@@ -254,22 +257,57 @@ def _render_user_defaults(mgr: ProjectManager) -> None:
     _render_ai_provider_section()
 
 
+_AI_SAVED_KEY = "ai_provider_config_saved"
+
+
 def _render_ai_provider_section() -> None:
     """Render the AI Provider configuration section."""
     st.divider()
     st.subheader("AI Provider")
+    if st.session_state.pop(_AI_SAVED_KEY, False):
+        st.success("AI provider config saved.")
 
     # Load current config to pre-populate fields
     current_config = _load_ai_config()
-    ai_cfg = current_config.get("ai_provider", {})
-    current_provider = ai_cfg.get("provider", "openai")
-    openai_cfg = ai_cfg.get("openai", {})
-    bedrock_cfg = ai_cfg.get("bedrock", {})
+    ai_cfg = current_config.get("ai_provider", {}) or {}
+    current_provider = str(ai_cfg.get("provider", "openai"))
+    openai_cfg = ai_cfg.get("openai", {}) or {}
+    bedrock_cfg = ai_cfg.get("bedrock", {}) or {}
+
+    # An invalid setting must not crash the page that is used to fix it.
+    try:
+        active_model: Optional[str] = get_model_name()
+    except ProviderConfigError as exc:
+        active_model = None
+        st.error(f"The AI provider setting is invalid: {exc}")
+
+    if os.environ.get(UORCA_AI_PROVIDER):
+        st.warning(
+            f"The {UORCA_AI_PROVIDER} environment variable is set to "
+            f"'{os.environ[UORCA_AI_PROVIDER]}'. It overrides the setting saved here."
+        )
+
+    # This page edits only the openai and bedrock settings. Another provider (a model
+    # string such as "anthropic:...", azure, openai_compatible, or an invalid value) is
+    # kept unless the user explicitly chooses to replace it.
+    other_provider = current_provider.strip().lower() not in ("openai", "bedrock")
+    allow_save = True
+    if other_provider:
+        st.info(
+            f"The saved AI provider is '{current_provider}'. This page edits only the "
+            "OpenAI and Bedrock settings; edit ~/.uorca/config.yaml or .env for other "
+            "providers (see 'Choosing the AI model' in the README)."
+        )
+        allow_save = st.checkbox(
+            f"Replace the '{current_provider}' setting with OpenAI or Bedrock",
+            value=False,
+            key="ai_replace_other_provider",
+        )
 
     provider = st.radio(
         "LLM Provider",
         ["openai", "bedrock"],
-        index=0 if current_provider != "bedrock" else 1,
+        index=1 if current_provider.strip().lower() == "bedrock" else 0,
         horizontal=True,
     )
 
@@ -281,9 +319,11 @@ def _render_ai_provider_section() -> None:
         )
         st.caption("Requires OPENAI_API_KEY environment variable.")
 
-        if st.button("Save AI Config", key="save_ai_config_openai"):
+        if st.button("Save AI Config", key="save_ai_config_openai", disabled=not allow_save):
             save_ai_config(provider="openai", openai_model=openai_model)
-            st.success("AI provider config saved.")
+            # Rerun so the page shows the new state, not the old notices.
+            st.session_state[_AI_SAVED_KEY] = True
+            st.rerun()
 
     else:  # bedrock
         col1, col2 = st.columns(2)
@@ -311,7 +351,7 @@ def _render_ai_provider_section() -> None:
             )
         st.caption("Requires AWS SSO login.")
 
-        if st.button("Save AI Config", key="save_ai_config_bedrock"):
+        if st.button("Save AI Config", key="save_ai_config_bedrock", disabled=not allow_save):
             save_ai_config(
                 provider="bedrock",
                 bedrock_config={
@@ -321,9 +361,12 @@ def _render_ai_provider_section() -> None:
                     "profile": bedrock_profile or None,
                 },
             )
-            st.success("AI provider config saved.")
+            # Rerun so the page shows the new state, not the old notices.
+            st.session_state[_AI_SAVED_KEY] = True
+            st.rerun()
 
-    st.caption(f"Current model: {get_model_name()}")
+    if active_model is not None:
+        st.caption(f"Current model: {active_model}")
 
 
 IMPORT_MODE = "Import Existing Results"

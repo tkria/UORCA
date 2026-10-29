@@ -189,18 +189,19 @@ def configured_provider() -> str:
     """The configured AI provider, read exactly as ``uorca.ai_provider`` reads it.
 
     Priority: ``UORCA_AI_PROVIDER``, then ``~/.uorca/config.yaml`` ``ai_provider.provider``,
-    then ``"openai"``. The helpers are reused rather than reimplemented so the two can
-    never drift apart.
+    then ``"openai"``. Returns the provider name only (``"anthropic"`` for
+    ``"anthropic:claude-x"``). Resolution is delegated to
+    :func:`uorca.ai_provider.resolve_model_spec`, so the two can never drift apart.
+
+    Raises:
+        ThemeMapProviderError: The provider setting is unknown or incomplete.
     """
-    config = ai_provider._load_ai_config()
-    provider = ai_provider._get_config_value(
-        config,
-        "ai_provider",
-        "provider",
-        env_var=ai_provider.UORCA_AI_PROVIDER,
-        default="openai",
-    )
-    return (provider or "openai").strip().lower()
+    try:
+        return ai_provider.resolve_model_spec().provider
+    except ai_provider.ProviderConfigError as exc:
+        raise ThemeMapProviderError(
+            f"The theme map cannot start because the AI provider setting is invalid: {exc}"
+        ) from exc
 
 
 def check_provider() -> None:
@@ -209,24 +210,28 @@ def check_provider() -> None:
     Two conditions, both checked **before any client is constructed and before any
     spend**:
 
-    * the configured provider is ``bedrock`` — Bedrock exposes no
-      ``text-embedding-3-small``, and the theme map's validated numbers were measured on
-      that model, so there is no honest fallback;
+    * the configured provider is anything other than plain OpenAI (``openai`` or
+      ``openai:<model>``). Bedrock, Azure, Anthropic, Gemini, an OpenAI-compatible server
+      and the rest offer no ``text-embedding-3-small``, and the theme map's validated
+      numbers were measured on that model, so there is no honest fallback. The corpus
+      text must also not go to OpenAI when the user chose another provider;
     * ``OPENAI_API_KEY`` is absent.
 
-    **This Bedrock guard applies to the embedding step only.** The naming call in
+    **This guard applies to the embedding step only.** The naming call in
     :mod:`~uorca.identification.theme_map.naming` goes through
-    :func:`uorca.ai_provider.get_model` and works on any provider, Bedrock included.
+    :func:`uorca.ai_provider.get_model` and works on any provider.
 
     Raises:
-        ThemeMapProviderError: On either condition. The Bedrock message names the config
-            key to change.
+        ThemeMapProviderError: On either condition, or when the provider setting is
+            invalid. The provider message names the config key to change.
     """
     provider = configured_provider()
-    if provider == "bedrock":
+    if provider != "openai":
         raise ThemeMapProviderError(
             "The theme map embeds text with OpenAI 'text-embedding-3-small', and the "
-            "configured AI provider is 'bedrock', which offers no equivalent model. "
+            f"configured AI provider is '{provider}'. The theme map does not send your "
+            "text to OpenAI when another provider is selected, and no other embedding "
+            "model has been validated for it, so it is not available. "
             "Set ai_provider.provider to 'openai' in ~/.uorca/config.yaml, or set the "
             "UORCA_AI_PROVIDER environment variable to 'openai', and try again. "
             "(Only the embedding step is affected; theme naming works on any provider.)"

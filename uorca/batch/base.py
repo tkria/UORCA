@@ -203,7 +203,7 @@ class BatchProcessor(ABC):
             }
 
             try:
-                with open(question_file, 'w') as f:
+                with open(question_file, 'w', encoding='utf-8') as f:
                     json.dump(question_data, f, indent=2)
                 print(f"Saved research question to: {question_file}")
             except Exception as e:

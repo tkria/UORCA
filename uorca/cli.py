@@ -8,6 +8,7 @@ This module provides a unified CLI for all UORCA workflows:
 """
 
 import argparse
+from dataclasses import dataclass
 import sys
 import os
 from pathlib import Path
@@ -96,7 +97,9 @@ For more help on a specific command, use:
     identify_advanced.add_argument('--model', type=str, default=None,
                                   help='OpenAI model for this run (sets UORCA_OPENAI_MODEL). '
                                        'Default: UORCA_OPENAI_MODEL, then ~/.uorca/config.yaml, '
-                                       'then gpt-5-mini. Ignored when the provider is bedrock.')
+                                       'then gpt-5-mini. Used only when the provider is plain '
+                                       "'openai'; ignored for every other provider, and when the "
+                                       "provider is set as 'openai:<model>'.")
     identify_advanced.add_argument('-v', '--verbose', action='store_true',
                                    help='Enable verbose logging (DEBUG level)')
 
@@ -299,15 +302,103 @@ def _load_environment_variables():
         load_dotenv(find_dotenv())
         print("Loaded environment variables from system .env file")
 
-def _check_environment_requirements(require_openai: bool = False):
-    """Check environment requirements and provide clear instructions if missing."""
+# Where to get a key for each provider, shown when that key is missing.
+_KEY_URLS = {
+    "openai": "OpenAI API key: https://platform.openai.com/api-keys",
+    "anthropic": "Anthropic API key: https://console.anthropic.com/settings/keys",
+    "google-gla": "Gemini API key: https://aistudio.google.com/apikey",
+    "groq": "Groq API key: https://console.groq.com/keys",
+    "mistral": "Mistral API key: https://console.mistral.ai/api-keys",
+    "cohere": "Cohere API key: https://dashboard.cohere.com/api-keys",
+    "azure": "Azure OpenAI key: Azure portal > your Azure OpenAI resource > Keys and Endpoint",
+    "openai_compatible": "the key for your OpenAI-compatible server (see that server's documentation)",
+    "bedrock": "AWS credentials: run 'aws sso login --profile <profile>' (or set AWS access keys)",
+    "google-vertex": "Google Cloud credentials: run 'gcloud auth application-default login'",
+}
+
+
+@dataclass
+class _AiCheck:
+    """Result of the AI provider check for an ``identify`` or ``run`` command."""
+
+    provider: Optional[str] = None
+    setting_error: Optional[str] = None  # the provider setting itself is wrong
+    missing_message: Optional[str] = None  # the selected provider's key is missing
+    missing_vars: tuple[str, ...] = ()  # variables to add to .env, when that fixes it
+    needs_openai_key: bool = False  # provider is OpenAI: keep the original message
+
+
+def _check_ai_provider(require_ai: Optional[str]) -> _AiCheck:
+    """Check the selected AI provider for an ``identify`` or ``run`` command.
+
+    ``run`` passes the provider settings and keys (by name) into the pipeline
+    containers (``uorca.batch.container_env``), so both commands need the same check.
+    """
+    if require_ai is None:
+        return _AiCheck()
+
+    from uorca import ai_provider
+
+    try:
+        spec = ai_provider.resolve_model_spec()
+    except ai_provider.ProviderConfigError as exc:
+        return _AiCheck(setting_error=str(exc))
+
+    if spec.provider == "openai":
+        return _AiCheck(provider="openai", needs_openai_key=True)
+
+    try:
+        ai_provider.check_provider_credentials(spec)
+    except ai_provider.MissingCredentialsError as exc:
+        return _AiCheck(provider=spec.provider, missing_message=str(exc),
+                        missing_vars=exc.env_vars)
+    except ai_provider.ProviderConfigError as exc:
+        return _AiCheck(provider=spec.provider, setting_error=str(exc))
+    if require_ai == "run":
+        try:
+            ai_provider.container_env(spec)  # fails now, not inside every job
+        except ai_provider.ProviderConfigError as exc:
+            return _AiCheck(provider=spec.provider, setting_error=str(exc))
+    return _AiCheck(provider=spec.provider)
+
+
+def _print_ai_setting_error(message: str) -> None:
+    """The provider setting is wrong: say what, and where the setting lives."""
+    from uorca.ai_provider import CONFIG_PATH, UORCA_AI_PROVIDER
+
+    print("\n" + "="*70)
+    print("❌ SETUP REQUIRED: The AI provider setting is invalid")
+    print("="*70)
+    print(f"\n  • {message}")
+    print("\n🔧 Where the setting lives:")
+    env_value = os.getenv(UORCA_AI_PROVIDER)
+    if env_value:
+        print(f"   {UORCA_AI_PROVIDER} is set to '{env_value}' (in your shell or .env). "
+              "It overrides the config file.")
+    else:
+        print(f"   {UORCA_AI_PROVIDER} (in your shell or .env), if set; otherwise "
+              f"ai_provider.provider in {CONFIG_PATH}")
+    print(f"   The config file is written by the app's Project Setup page. "
+          "See 'Choosing the AI model' in README.md for the valid values.")
+    print("="*70)
+
+
+def _check_environment_requirements(require_ai: Optional[str] = None):
+    """Check environment requirements and provide clear instructions if missing.
+
+    Args:
+        require_ai: ``"identify"`` or ``"run"`` when the command makes LLM calls; the
+            selected AI provider's key or credentials are then required. ``None`` for
+            commands without LLM calls.
+    """
     missing = []
 
     # Check required variables
     if not os.getenv("ENTREZ_EMAIL"):
         missing.append("ENTREZ_EMAIL")
 
-    if require_openai and not os.getenv("OPENAI_API_KEY"):
+    ai = _check_ai_provider(require_ai)
+    if ai.needs_openai_key and not os.getenv("OPENAI_API_KEY"):
         missing.append("OPENAI_API_KEY")
 
     # Inform about API key status
@@ -318,16 +409,21 @@ def _check_environment_requirements(require_openai: bool = False):
         print("ℹ️  ENTREZ_API_KEY not set - using slower rate limits (3 requests/second).")
         print("   For faster processing, consider getting a free NCBI API key.")
 
-    if not require_openai and not openai_key_set:
+    if require_ai is None and not openai_key_set:
         print("ℹ️  OPENAI_API_KEY not set - AI-powered analysis features will be disabled.")
-    
+
+    if ai.setting_error:
+        _print_ai_setting_error(ai.setting_error)
+
     # If missing required variables, show comprehensive instructions and exit
-    if missing:
+    if missing or ai.missing_message:
         print("\n" + "="*70)
         print("❌ SETUP REQUIRED: Missing essential API credentials")
         print("="*70)
 
         print("\n📋 What's missing:")
+        if ai.missing_message:
+            print(f"  • {ai.missing_message}")
         for var in missing:
             if var == "ENTREZ_EMAIL":
                 print("  • ENTREZ_EMAIL - Required by NCBI for accessing biological databases")
@@ -338,18 +434,27 @@ def _check_environment_requirements(require_openai: bool = False):
         print(f"\n🔧 How to fix this:")
         print(f"   Create or edit the file: {env_file_path}")
 
-        print(f"\n📝 Add these lines to your .env file:")
-        for var in missing:
+        env_lines = [*missing, *ai.missing_vars]
+        if env_lines:
+            print(f"\n📝 Add these lines to your .env file:")
+        for var in env_lines:
             if var == "ENTREZ_EMAIL":
                 print(f"   {var}=your.email@institution.edu")
             elif var == "OPENAI_API_KEY":
                 print(f"   {var}=sk-proj-your-key-here")
+            else:
+                print(f"   {var}=<your-key>")
 
-        print(f"\n🔗 Where to get API keys:")
-        if "OPENAI_API_KEY" in missing:
-            print(f"   • OpenAI API key: https://platform.openai.com/api-keys")
-        
+        key_provider = "openai" if "OPENAI_API_KEY" in missing else (
+            ai.provider if ai.missing_message else None)
+        if key_provider in _KEY_URLS:
+            print(f"\n🔗 Where to get API keys:")
+            print(f"   • {_KEY_URLS[key_provider]}")
+
         print("="*70)
+        sys.exit(1)
+
+    if ai.setting_error:
         sys.exit(1)
 
 
@@ -455,6 +560,8 @@ def build_identify_argv(args) -> list[str]:
     return argv
 
 
+
+
 def run_identify(args):
     """Run the dataset identification workflow."""
     # Import here to avoid startup overhead when not needed
@@ -462,7 +569,7 @@ def run_identify(args):
 
     # Load and validate environment variables
     _load_environment_variables()
-    _check_environment_requirements(require_openai=True)  # Identify needs OpenAI
+    _check_environment_requirements(require_ai="identify")
 
     if args.model:
         # The identification module picks its model through uorca.ai_provider, which
@@ -481,7 +588,7 @@ def run_batch_slurm(args):
     user datasets, or both."""
     print("Starting SLURM batch processing...")
     _load_environment_variables()
-    _check_environment_requirements(require_openai=True)
+    _check_environment_requirements(require_ai="run")
 
     geo_input = getattr(args, "input", None)
     user_configs: list[str] = list(getattr(args, "user_config", []) or [])
@@ -556,7 +663,7 @@ def run_batch_local(args):
 
     # Load and validate environment variables
     _load_environment_variables()
-    _check_environment_requirements(require_openai=True)  # Pipeline needs OpenAI
+    _check_environment_requirements(require_ai="run")
     
     # Check for Kallisto indices
     _check_kallisto_indices(args.resource_dir)
