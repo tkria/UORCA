@@ -479,6 +479,14 @@ def _draw_expression_plots(
     if check_ai_generating():
         return
 
+    for dataset_id in dataset_selection:
+        sample_name_error = getattr(ri, "sample_name_errors", {}).get(dataset_id)
+        if sample_name_error:
+            st.error(
+                f"Sample names for {dataset_id} could not be matched to the sample table, "
+                f"so its samples may not be assigned to groups. {sample_name_error}"
+            )
+
     with st.spinner("Generating expression plots..."):
         try:
             # Use all genes at once (no pagination)

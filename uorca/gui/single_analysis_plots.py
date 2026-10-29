@@ -13,6 +13,12 @@ from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import pdist
 from scipy.stats import zscore
 
+from uorca.gui.sample_names import (
+    find_sample_table,
+    read_sample_table,
+    sample_groups,
+    sample_titles,
+)
 from uorca.gui.results_integration import (
     ADJUSTED_P_COLUMN,
     ADJUSTED_P_LABEL,
@@ -47,47 +53,37 @@ def load_cpm(path: str) -> pd.DataFrame:
     return df
 
 
-def _first_existing(paths):
-    for p in paths:
-        if os.path.isfile(p):
-            return p
-    return None
-
-
 def load_sample_groups(results_dir: str, analysis_id: str, cpm_df: pd.DataFrame, analysis_info: Optional[Dict] = None) -> Optional[pd.Series]:
-    """Return a mapping of sample names to group labels if available."""
-    analysis_dir = os.path.join(results_dir, analysis_id)
-    sample_file_locations = [
-        os.path.join(analysis_dir, "metadata", "edger_analysis_samples.csv"),
-        os.path.join(analysis_dir, "edger_analysis_samples.csv"),
-        os.path.join(results_dir, "edger_analysis_samples.csv"),
-        os.path.join(os.path.dirname(results_dir), "edger_analysis_samples.csv"),
-    ]
-    sample_file = _first_existing(sample_file_locations)
+    """Group of each CPM sample column, joined by sample ID (see uorca.gui.sample_names).
+
+    Falls back to each sample as its own group when the sample table or the
+    group column is missing, as before.
+    """
     sample_cols = [c for c in cpm_df.columns if c != "Gene"]
+    identity = pd.Series({c: c for c in sample_cols})
+    sample_file = find_sample_table(results_dir, analysis_id)
+    group_col = (analysis_info or {}).get("merged_column")
+    if not sample_file or not group_col:
+        return identity
+    sample_df = read_sample_table(sample_file)
+    if group_col not in sample_df.columns:
+        logger.warning(f"Group column {group_col!r} not in {sample_file}")
+        return identity
+    groups = sample_groups(sample_df, group_col)
+    present = set(sample_cols)
+    matched = groups.reindex([s for s in groups.index if s in present])
+    if matched.empty:
+        logger.warning(f"No CPM sample column of {analysis_id} matches a sample ID in {sample_file}")
+        return identity
+    return matched
+
+
+def load_sample_titles(results_dir: str, analysis_id: str) -> Optional[pd.Series]:
+    """GEO sample title of each sample, keyed by sample ID; None without a sample table."""
+    sample_file = find_sample_table(results_dir, analysis_id)
     if not sample_file:
-        return pd.Series({c: c for c in sample_cols})
-    try:
-        tmp = pd.read_csv(sample_file, nrows=0)
-        first_col = tmp.columns[0]
-        has_index = first_col == "" or first_col.startswith("Unnamed")
-        sample_df = pd.read_csv(sample_file, index_col=0 if has_index else None)
-        group_col = None
-        if analysis_info and "merged_column" in analysis_info:
-            group_col = analysis_info["merged_column"]
-        if group_col and group_col in sample_df.columns:
-            sample_pattern = [c for c in sample_cols if c.startswith("Sample")]
-            mapping = {}
-            if sample_pattern:
-                for i in range(min(len(sample_pattern), len(sample_df))):
-                    mapping[sample_pattern[i]] = sample_df.iloc[i][group_col]
-            else:
-                for i in range(min(len(sample_cols), len(sample_df))):
-                    mapping[sample_cols[i]] = sample_df.iloc[i][group_col]
-            return pd.Series(mapping)
-    except Exception:
-        pass
-    return pd.Series({c: c for c in sample_cols})
+        return None
+    return sample_titles(read_sample_table(sample_file))
 
 
 def create_volcano_plot(
@@ -181,7 +177,8 @@ def create_deg_heatmap(cpm: pd.DataFrame,
                       top_n: int = 50,
                       font_size: int = 12,
                       gene_height_px: int = 22,
-                      sample_width_px: int = 80) -> Optional[go.Figure]:
+                      sample_width_px: int = 80,
+                      sample_titles: Optional[pd.Series] = None) -> Optional[go.Figure]:
     """
     Create an interactive clustered heatmap of CPM expression for the top differentially expressed genes.
 
@@ -203,6 +200,8 @@ def create_deg_heatmap(cpm: pd.DataFrame,
         Pixel height per gene row for figure height calculation
     sample_width_px : int
         Pixel width per sample column for figure width calculation
+    sample_titles : Optional[pd.Series]
+        GEO sample title of each sample ID, shown in the hover text
 
     Returns
     -------
@@ -272,7 +271,9 @@ def create_deg_heatmap(cpm: pd.DataFrame,
         for sample in heat_df.columns:
             expr_val = heat_df.at[gene, sample]
             group = group_labels[sample] if group_labels is not None and sample in group_labels.index else sample
-            row_hover.append(f"Gene: {gene}<br>Sample: {sample}<br>Group: {group}<br>Expression (logCPM): {expr_val:.2f}")
+            title = sample_titles.get(sample, "") if sample_titles is not None else ""
+            sample_text = f"{sample} ({title})" if title else str(sample)
+            row_hover.append(f"Gene: {gene}<br>Sample: {sample_text}<br>Group: {group}<br>Expression (logCPM): {expr_val:.2f}")
         hover_text.append(row_hover)
 
     # Determine figure size dynamically
@@ -382,7 +383,8 @@ def create_deg_heatmap(cpm: pd.DataFrame,
 
 
 def create_pca_plot(cpm: pd.DataFrame, group_labels: Optional[pd.Series] = None,
-                    n_components: int = 2) -> go.Figure:
+                    n_components: int = 2,
+                    sample_titles: Optional[pd.Series] = None) -> go.Figure:
     """Perform PCA on logCPM expression values."""
     if "Gene" in cpm.columns:
         cpm = cpm.set_index("Gene")
@@ -392,10 +394,14 @@ def create_pca_plot(cpm: pd.DataFrame, group_labels: Optional[pd.Series] = None,
     coords = pca.fit_transform(scaled)
     pc_df = pd.DataFrame(coords, columns=[f"PC{i+1}" for i in range(n_components)])
     pc_df.index = cpm.columns
+    hover_data = None
+    if sample_titles is not None:
+        pc_df["title"] = pc_df.index.map(sample_titles).fillna("")
+        hover_data = {"title": True}
     if group_labels is not None:
         pc_df["group"] = pc_df.index.map(group_labels).fillna(pc_df.index)
-        fig = px.scatter(pc_df, x="PC1", y="PC2", color="group", hover_name=pc_df.index)
+        fig = px.scatter(pc_df, x="PC1", y="PC2", color="group", hover_name=pc_df.index, hover_data=hover_data)
     else:
-        fig = px.scatter(pc_df, x="PC1", y="PC2", hover_name=pc_df.index)
+        fig = px.scatter(pc_df, x="PC1", y="PC2", hover_name=pc_df.index, hover_data=hover_data)
     fig.update_layout(xaxis_title="PC1", yaxis_title="PC2")
     return fig

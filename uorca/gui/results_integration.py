@@ -50,6 +50,15 @@ from dataclasses import dataclass
 import html
 
 # p-value columns and labels live in uorca.core.pvalues; re-exported for the GUI.
+from uorca.gui.sample_names import (
+    SAMPLE_TABLE_NAME,
+    SampleTableMismatch,
+    find_sample_table,
+    name_cpm_columns,
+    read_sample_table,
+    sample_groups,
+    sample_titles,
+)
 from uorca.core.pvalues import (
     ADJUSTED_P_COLUMN,
     ADJUSTED_P_HELP,
@@ -322,6 +331,8 @@ class ResultsIntegrator:
         # datasets can use the same contrast name with different meanings.
         self.contrast_info_by_analysis: Dict[Tuple[str, str], Dict] = {}
         self.deg_file_paths: Dict[str, Dict[str, str]] = {}  # analysis_id -> contrast_id -> DEG.csv
+        # analysis_id -> why its CPM columns could not be named by sample ID
+        self.sample_name_errors: Dict[str, str] = {}
 
         logger.info(f"Initialized ResultsIntegrator with results_dir: {self.results_dir}")
 
@@ -595,6 +606,7 @@ class ResultsIntegrator:
                     logger.error(f"Error loading DEG file {deg_file}: {str(e)}")
 
         # Load CPM data
+        self.sample_name_errors = {}
         for analysis_id, cpm_file in cpm_files.items():
             try:
                 df = pd.read_csv(cpm_file)
@@ -613,6 +625,15 @@ class ResultsIntegrator:
 
                 # Standardize column name to 'Gene'
                 df = df.rename(columns={gene_col: 'Gene'})
+
+                # Name the sample columns by GSM accession (old runs wrote Sample1..N)
+                sample_table = find_sample_table(self.results_dir, analysis_id)
+                if sample_table:
+                    try:
+                        df = name_cpm_columns(df, read_sample_table(sample_table))
+                    except SampleTableMismatch as e:
+                        self.sample_name_errors[analysis_id] = str(e)
+                        logger.error(f"{analysis_id}: {e}")
 
                 # Store in dictionary
                 self.cpm_data[analysis_id] = df
@@ -1368,73 +1389,21 @@ class ResultsIntegrator:
                 logger.warning(f"No matching genes found in CPM data for {analysis_id}")
                 continue
 
-            # Get the sample groups from the edger_analysis_samples.csv file
+            # Groups and titles from edger_analysis_samples.csv, keyed by sample ID.
+            # load_data() already named the CPM columns by sample ID.
             sample_to_group = {}
-
-            # Helper function to find first existing file
-            def first_existing(paths):
-                for path in paths:
-                    if os.path.isfile(path):
-                        return path
-                return None
-
-            # Look inside the current analysis directory first
-            analysis_dir = os.path.join(self.results_dir, analysis_id)
-            sample_file_locations = [
-                os.path.join(analysis_dir, "metadata", "edger_analysis_samples.csv"),  # New primary location
-                os.path.join(analysis_dir, "edger_analysis_samples.csv"),  # Old location for backward compatibility
-                os.path.join(self.results_dir, "edger_analysis_samples.csv"),
-                os.path.join(os.path.dirname(self.results_dir), "edger_analysis_samples.csv")
-            ]
-
-            edger_samples_file = first_existing(sample_file_locations)
+            sample_to_title = {}
+            edger_samples_file = find_sample_table(self.results_dir, analysis_id)
             if edger_samples_file:
-                logger.info(f"Found sample mapping file at {edger_samples_file}")
-
-            if edger_samples_file:
-                try:
-                    # First try loading the file to check its structure
-                    sample_mapping_df = pd.read_csv(edger_samples_file, nrows=0)
-
-                    # If the first column has no name or starts with 'Unnamed', it's probably an index
-                    first_col = sample_mapping_df.columns[0]
-                    has_index = first_col == '' or first_col.startswith('Unnamed')
-
-                    # Now load the full file with appropriate index_col setting
-                    sample_mapping_df = pd.read_csv(edger_samples_file, index_col=0 if has_index else None)
-                    logger.info(f"Loaded sample mapping with columns: {', '.join(sample_mapping_df.columns)}")
-
-                    # Find the group column from analysis_info
-                    group_col = None
-                    if self.analysis_info and analysis_id in self.analysis_info and 'merged_column' in self.analysis_info[analysis_id]:
-                        group_col = self.analysis_info[analysis_id]['merged_column']
-                        logger.info(f"Using merged column '{group_col}' from analysis_info")
-
-                    if group_col and group_col in sample_mapping_df.columns:
-                        # Look for a 'Sample1', 'Sample2', etc. naming pattern in CPM columns
-                        cpm_columns = self.cpm_data[analysis_id].columns.tolist()
-                        sample_cols = [col for col in cpm_columns if col.startswith('Sample') and col != 'Gene']
-
-                        if sample_cols:
-                            # Create a mapping from sample name to group
-                            for i in range(len(sample_mapping_df)):
-                                if i < len(sample_cols):  # Ensure we don't go out of bounds
-                                    sample_key = sample_cols[i]
-                                    sample_to_group[sample_key] = sample_mapping_df.iloc[i][group_col]
-                            logger.info(f"Created mapping for {len(sample_to_group)} samples using Sample# pattern")
-                        else:
-                            # Fall back to index-based mapping
-                            for i in range(len(sample_mapping_df)):
-                                # Use sample index (i) as the key (starting with Sample1)
-                                sample_key = f"Sample{i+1}"
-                                sample_to_group[sample_key] = sample_mapping_df.iloc[i][group_col]
-                            logger.info(f"Created mapping for {len(sample_to_group)} samples using index")
-                    else:
-                        logger.warning(f"No group column found in sample mapping file")
-                except Exception as e:
-                    logger.warning(f"Error loading sample mapping file: {str(e)}")
+                sample_mapping_df = read_sample_table(edger_samples_file)
+                group_col = self.analysis_info.get(analysis_id, {}).get('merged_column')
+                if group_col and group_col in sample_mapping_df.columns:
+                    sample_to_group = sample_groups(sample_mapping_df, group_col).to_dict()
+                else:
+                    logger.warning(f"Group column {group_col!r} not in {edger_samples_file}")
+                sample_to_title = sample_titles(sample_mapping_df).to_dict()
             else:
-                logger.warning("Could not find edger_analysis_samples.csv file. Using default sample names.")
+                logger.warning(f"No {SAMPLE_TABLE_NAME} for {analysis_id}; groups not known")
 
             # Convert to long format
             melted_df = cpm_filtered.melt(
@@ -1479,6 +1448,8 @@ class ResultsIntegrator:
             # Create custom hover text with all the information we want (after Group is assigned)
             melted_df['HoverText'] = (
                 "<b>Dataset:</b> " + melted_df['DatasetDisplay'] + "<br>" +
+                "<b>Sample:</b> " + melted_df['Sample'].astype(str) +
+                melted_df['Sample'].map(sample_to_title).fillna("").map(lambda t: f" ({t})" if t else "") + "<br>" +
                 "<b>Group:</b> " + melted_df['Group'].astype(str) + "<br>" +
                 "<b>Expression:</b> " + melted_df['Expression'].round(2).astype(str)
             )

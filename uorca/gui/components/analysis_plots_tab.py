@@ -36,6 +36,7 @@ try:
         create_ma_plot,
         create_deg_heatmap,
         load_sample_groups,
+        load_sample_titles,
     )
     SINGLE_PLOTS_AVAILABLE = True
 except ImportError as e:
@@ -270,6 +271,13 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
     
     st.markdown("---")  # Add separator after download section
 
+    sample_name_error = getattr(ri, "sample_name_errors", {}).get(selected_dataset)
+    if sample_name_error:
+        st.error(
+            f"Sample names for {selected_dataset} could not be matched to the sample table, "
+            f"so plots show the generic names from CPM.csv and the groups may be missing. {sample_name_error}"
+        )
+
     # Load sample groups for the selected dataset
     groups = _load_sample_groups(ri, selected_dataset)
 
@@ -367,7 +375,8 @@ def _render_quality_overview_tab(ri: ResultsIntegrator, selected_dataset: str, q
     if ri and selected_dataset in ri.cpm_data and SINGLE_PLOTS_AVAILABLE:
         try:
             cpm_df = ri.cpm_data[selected_dataset]
-            pca_fig = create_pca_plot(cpm_df, groups)
+            titles = load_sample_titles(ri.results_dir, selected_dataset)
+            pca_fig = create_pca_plot(cpm_df, groups, sample_titles=titles)
         except Exception:
             pca_fig = None
 
@@ -644,7 +653,8 @@ def _render_heatmap_plot_tab(ri: ResultsIntegrator, selected_dataset: str, selec
         try:
             deg_df = ri.deg_data[selected_dataset][selected_contrast]
             cpm_df = ri.cpm_data[selected_dataset]
-            heatmap_fig = create_deg_heatmap(cpm_df, deg_df, groups)
+            titles = load_sample_titles(ri.results_dir, selected_dataset)
+            heatmap_fig = create_deg_heatmap(cpm_df, deg_df, groups, sample_titles=titles)
         except Exception as e:
             st.warning(f"Error creating interactive DEG heatmap: {e}")
             heatmap_fig = None
