@@ -8,20 +8,44 @@ st.set_page_config(
 )
 
 
+# Set by ``uorca explore <results_dir>``; the same name as uorca.gui.pages.explore.RESULTS_DIR_ENV.
+DEFAULT_RESULTS_ENV = "UORCA_DEFAULT_RESULTS_DIR"
+
+
+def _guarded_page(title: str, module_path: str):
+    """A page callable that imports its module lazily and contains its failure.
+
+    A page that fails to import or render shows the error (with traceback) on that page; the
+    navigation and the other pages keep working. See ``render_tab_safely``.
+    """
+    from uorca.gui.components.helpers.tab_guard import render_tab_safely
+
+    def run_page() -> None:
+        render_tab_safely(title, module_path, "page", "page")
+
+    run_page.__name__ = f"page_{module_path.rsplit('.', 1)[-1]}"
+    return run_page
+
+
 def main():
     import os
 
-    from uorca.gui.pages import home, project_setup, identify, run, explore
-
     # `uorca explore <results_dir>` should open straight onto those results.
-    open_on_explore = bool(os.environ.get(explore.RESULTS_DIR_ENV))
+    open_on_explore = bool(os.environ.get(DEFAULT_RESULTS_ENV))
 
-    # Create page objects and store in session state for switch_page access
-    page_home = st.Page(home.page, title="Home", icon="🏠", default=not open_on_explore, url_path="home")
-    page_setup = st.Page(project_setup.page, title="Project Setup", icon="⚙️", url_path="project-setup")
-    page_identify = st.Page(identify.page, title="Identify", icon="🔍", url_path="identify")
-    page_run = st.Page(run.page, title="Run", icon="🚀", url_path="run")
-    page_explore = st.Page(explore.page, title="Explore", icon="📊", default=open_on_explore, url_path="explore")
+    # Create page objects and store in session state for switch_page access. Each page module
+    # is imported only when that page runs, inside its own guard.
+    pages_pkg = "uorca.gui.pages"
+    page_home = st.Page(_guarded_page("Home", f"{pages_pkg}.home"), title="Home", icon="🏠",
+                        default=not open_on_explore, url_path="home")
+    page_setup = st.Page(_guarded_page("Project Setup", f"{pages_pkg}.project_setup"),
+                         title="Project Setup", icon="⚙️", url_path="project-setup")
+    page_identify = st.Page(_guarded_page("Identify", f"{pages_pkg}.identify"),
+                            title="Identify", icon="🔍", url_path="identify")
+    page_run = st.Page(_guarded_page("Run", f"{pages_pkg}.run"), title="Run", icon="🚀",
+                       url_path="run")
+    page_explore = st.Page(_guarded_page("Explore", f"{pages_pkg}.explore"), title="Explore",
+                           icon="📊", default=open_on_explore, url_path="explore")
 
     st.session_state["_pages"] = {
         "home": page_home,
@@ -40,9 +64,6 @@ def main():
     _import_default_results_dir()
     _render_project_selector()
     pg.run()
-
-
-DEFAULT_RESULTS_ENV = "UORCA_DEFAULT_RESULTS_DIR"
 
 
 def _import_default_results_dir():

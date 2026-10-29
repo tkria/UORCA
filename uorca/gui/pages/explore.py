@@ -75,13 +75,7 @@ def page():
 def _render_explorer(results_dir: str):
     from uorca.gui.components.helpers import _validate_results_dir, get_integrator, add_custom_css
     from uorca.gui.components.sidebar_controls import render_sidebar_controls
-    from uorca.gui.components.heatmap_tab import render_heatmap_tab
-    from uorca.gui.components.expression_plots_tab import render_expression_plots_tab
-    from uorca.gui.components.analysis_plots_tab import render_analysis_plots_tab
-    from uorca.gui.components.datasets_info_tab import render_datasets_info_tab
-    from uorca.gui.components.contrasts_info_tab import render_contrasts_info_tab
-    from uorca.gui.components.ai_assistant_tab import render_ai_assistant_tab
-    from uorca.gui.components.uorca_summary_tab import render_uorca_summary_tab
+    from uorca.gui.components.helpers.tab_guard import render_tab_safely
 
     add_custom_css()
     valid_dir, validation_error = _validate_results_dir(results_dir)
@@ -104,17 +98,29 @@ def _render_explorer(results_dir: str):
         "Plot Gene Expression", "View Dataset Analyses", "View Dataset Info", "View Contrast Info",
     ])
 
+    # Each tab imports its own module inside its own block, so a tab that fails to import or
+    # render shows its error (with traceback) there, and the other tabs still work.
+    components = "uorca.gui.components"
     with tab_summary:
-        render_uorca_summary_tab(ri=ri, results_dir=results_dir)
+        render_tab_safely("UORCA Summary", f"{components}.uorca_summary_tab",
+                          "render_uorca_summary_tab", ri=ri, results_dir=results_dir)
     with tab_ai:
-        render_ai_assistant_tab(ri=ri, results_dir=results_dir, selected_datasets=selected_datasets)
+        render_tab_safely("AI Assistant", f"{components}.ai_assistant_tab",
+                          "render_ai_assistant_tab", ri=ri, results_dir=results_dir,
+                          selected_datasets=selected_datasets)
     with tab1:
-        render_heatmap_tab(ri=ri, selected_datasets=selected_datasets)
+        render_tab_safely("Explore DEG Heatmap", f"{components}.heatmap_tab",
+                          "render_heatmap_tab", ri=ri, selected_datasets=selected_datasets)
     with tab2:
-        render_expression_plots_tab(ri=ri, selected_datasets=selected_datasets)
+        render_tab_safely("Plot Gene Expression", f"{components}.expression_plots_tab",
+                          "render_expression_plots_tab", ri=ri,
+                          selected_datasets=selected_datasets)
     with tab3:
-        render_analysis_plots_tab(ri=ri, results_dir=results_dir)
+        render_tab_safely("View Dataset Analyses", f"{components}.analysis_plots_tab",
+                          "render_analysis_plots_tab", ri=ri, results_dir=results_dir)
     with tab4:
-        render_datasets_info_tab(ri=ri)
+        render_tab_safely("View Dataset Info", f"{components}.datasets_info_tab",
+                          "render_datasets_info_tab", ri=ri)
     with tab5:
-        render_contrasts_info_tab(ri=ri, pvalue_thresh=0.05, lfc_thresh=1.0)
+        render_tab_safely("View Contrast Info", f"{components}.contrasts_info_tab",
+                          "render_contrasts_info_tab", ri=ri, pvalue_thresh=0.05, lfc_thresh=1.0)

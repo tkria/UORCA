@@ -23,3 +23,68 @@ jobs:
         env:
           OPENAI_API_KEY: "<not-a-real-key>"
         run: uv run pytest
+
+  # Browser tests (Playwright): start the real app with an isolated HOME and fake results,
+  # and click through it. Screenshots and Streamlit logs of failed tests are uploaded.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Install dependencies (with the e2e group)
+        run: uv sync --locked --group e2e
+      - name: Install Chromium for Playwright
+        run: uv run playwright install --with-deps chromium
+      - name: Run browser tests
+        env:
+          OPENAI_API_KEY: "<not-a-real-key>"
+          UORCA_E2E_ARTIFACTS_DIR: ${{ runner.temp }}/e2e-artifacts
+        run: uv run pytest -m e2e -p no:cacheprovider --no-cov -q
+      - name: Upload screenshots and logs of failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: ${{ runner.temp }}/e2e-artifacts
+          if-no-files-found: warn
+
+  # Windows: the install needs no C++ compiler (every locked package has a wheel), the CLI
+  # starts without the uorca.exe shim, the unit tests pass, and the app opens Explore.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Run the CLI without the uorca.exe shim
+        run: uv run python -m uorca --help
+      - name: Run unit tests
+        env:
+          OPENAI_API_KEY: "<not-a-real-key>"
+        run: uv run pytest tests/unit -p no:cacheprovider --no-cov -q
+      - name: Install the e2e group and Chromium
+        run: |
+          uv sync --locked --group e2e
+          uv run playwright install chromium
+      - name: Browser tests - open each page, then import fixture results and open all 7 Explore tabs
+        # The second test imports the AI Assistant tab (and so mcp/pywin32) on Windows and fails
+        # on any st.error box or exception in any tab.
+        env:
+          OPENAI_API_KEY: "<not-a-real-key>"
+          UORCA_E2E_ARTIFACTS_DIR: ${{ runner.temp }}/e2e-artifacts
+        run: >-
+          uv run pytest -m e2e -p no:cacheprovider --no-cov -q
+          tests/e2e/test_import_results_e2e.py::test_existing_pages_still_load
+          tests/e2e/test_import_results_e2e.py::test_gui_import_into_new_project_from_explore
+      - name: Upload screenshots and logs of failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-windows
+          path: ${{ runner.temp }}/e2e-artifacts
+          if-no-files-found: warn

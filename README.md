@@ -134,6 +134,37 @@ apptainer pull uorca_0.1.0.sif docker://kevingchen/uorca:0.1.0
 docker pull kevingchen/uorca:0.1.0
 ```
 
+### Windows
+
+Identification and Explore run on Windows without a C++ compiler. Install with `uv sync`, as above:
+
+```powershell
+uv sync
+uv run uorca --help
+```
+
+- **Use `uv sync`, never `uv pip install -e .`** `uv pip install` ignores `uv.lock` and can install
+  different versions. The next `uv run` then syncs back to the lock, and the environment ends up
+  mixed.
+- **If Windows blocks `uorca.exe`** ("Access is denied"), run the same command through Python, which
+  does not need the `.exe` shim in `.venv\Scripts`:
+
+  ```powershell
+  uv run python -m uorca --help
+  uv run python -m uorca explore
+  ```
+
+- **To recover a mixed or broken environment**, move `.venv` aside and sync again (delete the old
+  folder only after the new one works):
+
+  ```powershell
+  Rename-Item .venv .venv.old
+  uv sync
+  ```
+
+If a tab in Explore fails, it shows the error and its traceback in that tab, and the other tabs
+keep working. Please include that traceback when you report a problem.
+
 ### 🔑 Environment variables
 
 UORCA requires API credentials for accessing biological databases and AI services.
