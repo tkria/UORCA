@@ -30,7 +30,7 @@ import difflib
 import re
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Iterable, Literal, Mapping
+from typing import Iterable, Literal, Mapping, get_args
 
 import pandas as pd
 
@@ -54,8 +54,44 @@ IssueCode = Literal[
     "unscaled",
     "sanitisation_fault",
     "crosses_nested_block",
+    "unknown_contrast_type",
+    "type_mismatch",
 ]
 Severity = Literal["error", "warning"]
+
+ContrastType = Literal[
+    "perturbation_vs_control",
+    "rescue_vs_perturbation",
+    "rescue_vs_control",
+    "dose_vs_control",
+    "dose_vs_dose",
+    "time_vs_baseline",
+    "drug_vs_drug",
+    "interaction",
+    "average",
+    "other",
+]
+"""Objective contrast types (owner decision 2026-10-28)."""
+
+CONTRAST_TYPES: tuple[str, ...] = get_args(ContrastType)
+
+SHAPE_OF_TYPE: dict[str, ContrastShape | None] = {
+    "perturbation_vs_control": "pairwise",
+    "rescue_vs_perturbation": "pairwise",
+    "rescue_vs_control": "pairwise",
+    "dose_vs_control": "pairwise",
+    "dose_vs_dose": "pairwise",
+    "time_vs_baseline": "pairwise",
+    "drug_vs_drug": "pairwise",
+    "interaction": "interaction",
+    "average": "average",
+    "other": None,
+}
+"""The weight shape each contrast type must have; ``None`` means any.
+
+Only the shape can be checked from the weights. Whether a pairwise contrast
+is, for example, a rescue vs its perturbation depends on what the groups are,
+which the design does not encode."""
 
 
 class ContrastParseError(ValueError):
@@ -384,6 +420,7 @@ def check_contrast(
     level_names: Mapping[str, str],
     *,
     block_of_group: Mapping[str, Mapping[str, str]] | None = None,
+    contrast_type: str | None = None,
 ) -> ContrastCheck:
     """Check one contrast against the design levels.
 
@@ -394,6 +431,10 @@ def check_contrast(
         block_of_group: ``{block: {raw group level: block level}}`` for blocks
             determined by the group (from
             ``DesignValidationResult.block_of_group()``).
+        contrast_type: Declared type (one of ``CONTRAST_TYPES``). Its weight
+            shape is checked: an ``interaction`` must have +1/+1/-1/-1
+            weights, an ``average`` must be a scaled average, and the other
+            named types must be pairwise.
     """
     issues: list[ContrastIssue] = []
     if not R_SYNTACTIC_NAME.match(name) or r_make_names(name) != name:
@@ -487,14 +528,37 @@ def check_contrast(
                     )
                 )
 
+    if contrast_type is not None:
+        issues.extend(_type_issues(contrast_type, shape))
+
     float_weights = {k: float(v) for k, v in weights.items()}
     if any(i.severity == "error" for i in issues):
         shape = "invalid"
     return ContrastCheck(name, expression, r_expression, float_weights, shape, issues)
 
 
+def _type_issues(contrast_type: str, shape: ContrastShape) -> list[ContrastIssue]:
+    if contrast_type not in SHAPE_OF_TYPE:
+        return [
+            ContrastIssue(
+                "unknown_contrast_type", "error",
+                f"contrast_type {contrast_type!r} is not one of {list(CONTRAST_TYPES)}.",
+            )
+        ]
+    expected = SHAPE_OF_TYPE[contrast_type]
+    if expected is None or shape == "invalid" or shape == expected:
+        return []
+    return [
+        ContrastIssue(
+            "type_mismatch", "error",
+            f"contrast_type {contrast_type!r} needs a {expected} contrast, but the "
+            f"weights form a {shape} contrast.",
+        )
+    ]
+
+
 def check_contrasts(
-    contrasts: pd.DataFrame | Iterable[Mapping[str, str]],
+    contrasts: pd.DataFrame | Iterable[Mapping[str, object]],
     levels: Iterable[object],
     *,
     block_of_group: Mapping[str, Mapping[str, str]] | None = None,
@@ -520,8 +584,15 @@ def check_contrasts(
     for i, row in enumerate(rows):
         if "name" not in row or "expression" not in row:
             raise ValueError(f"Contrast row {i} needs 'name' and 'expression': {row}")
+        declared = row.get("contrast_type")
+        if isinstance(declared, float) and declared != declared:  # NaN: column present, cell empty
+            declared = None
+        if declared is not None and not isinstance(declared, str):
+            raise ValueError(f"Contrast row {i}: contrast_type must be a string, got {declared!r}")
         check = check_contrast(
-            str(row["name"]), str(row["expression"]), names, block_of_group=block_of_group
+            str(row["name"]), str(row["expression"]), names,
+            block_of_group=block_of_group,
+            contrast_type=declared or None,
         )
         if check.name in seen:
             check.issues.append(

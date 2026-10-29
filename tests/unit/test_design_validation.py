@@ -154,13 +154,13 @@ def test_block_nested_in_group_is_dropped():
 
 
 def test_partially_confounded_block_is_dropped_by_rank_check():
-    # Both blocks are crossed with the group, but b2 has the same partition
-    # as b, so adding it after b makes the matrix rank-deficient.
+    # Both blocks are crossed with the group and neither determines the
+    # other, but b2's columns lie in the span of the group and b columns.
     df = pd.DataFrame(
         {
-            "g": ["A", "A", "A", "B", "B", "B"],
-            "b": ["x", "y", "y", "x", "y", "y"],
-            "b2": ["p", "q", "q", "p", "q", "q"],
+            "g": ["A", "A", "B", "B", "C", "C", "A", "B"],
+            "b": ["x", "y", "y", "z", "z", "x", "x", "y"],
+            "b2": ["p", "p", "p", "p", "q", "q", "p", "r"],
         }
     )
     result = validate_design(df, ["g"], ["b", "b2"])
@@ -246,3 +246,38 @@ def test_duplicated_column_name_raises():
     )
     with pytest.raises(DesignValidationError, match="more than once"):
         validate_design(df, ["g"])
+
+
+def _gse298581_with_pair() -> pd.DataFrame:
+    df = _samples("GSE298581")
+    df["pair"] = df[CELL_LINE].astype(str) + "_" + df["characteristics_ch1.5.replicate"].astype(str)
+    return df
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [["pair"], [CELL_LINE, "pair", GSE298581_BATCH], ["pair", CELL_LINE]],
+)
+def test_gse298581_pair_block_has_33_residual_df(blocks):
+    """Owner 2026-10-28: (cell line, replicate) pairs are the block.
+
+    Checked against R: model.matrix(~0 + treatment + pair) has 15 columns,
+    rank 15, residual df 33.
+    """
+    result = validate_design(_gse298581_with_pair(), [GSE298581_TREATMENT], blocks)
+    assert result.formula == "~0 + group + pair"
+    assert result.rank == 15
+    assert result.residual_df == 33
+    dropped = {d.column: d.reason_code for d in result.dropped_terms}
+    if CELL_LINE in blocks:
+        assert dropped[CELL_LINE] == "implied_by_block"
+        assert "'pair'" in next(d.reason for d in result.dropped_terms if d.column == CELL_LINE)
+
+
+def test_identical_blocks_keep_the_first():
+    df = pd.DataFrame(
+        {"g": ["A", "B"] * 4, "b1": ["x", "x", "y", "y"] * 2, "b2": ["p", "p", "q", "q"] * 2}
+    )
+    result = validate_design(df, ["g"], ["b1", "b2"])
+    assert result.block_columns == ["b1"]
+    assert {d.column: d.reason_code for d in result.dropped_terms} == {"b2": "implied_by_block"}

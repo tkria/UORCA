@@ -24,6 +24,16 @@ def test_streamlit_is_always_headless() -> None:
     assert cmd[cmd.index("--server.headless") + 1] == "true"
 
 
+def test_streamlit_runs_with_this_python_not_a_script_shim() -> None:
+    """No ``uv``/``streamlit.exe`` shim: Windows policies can block .exe files in the venv."""
+    import sys
+
+    from uorca.explore import build_streamlit_command
+
+    cmd = build_streamlit_command(Path("app.py"), 8501, "127.0.0.1")
+    assert cmd[:4] == [sys.executable, "-m", "streamlit", "run"]
+
+
 @pytest.mark.parametrize(("headless", "opens"), [(True, False), (False, True)])
 def test_headless_flag_controls_the_browser(headless: bool, opens: bool) -> None:
     from uorca.explore import should_open_browser

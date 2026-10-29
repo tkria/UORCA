@@ -29,11 +29,12 @@ groups:
 contrasts:
   required:
     # B4galt1-HKO (assumed hepatocyte-specific knockout) vs wild type, both on CDAHFD for 15 weeks. The paper links B4GALT1 to the PPARG/ACSL4 axis, so this is indirect evidence on PPARG.
-    - {target: [B4galt1_HKO], reference: [WT], type: main_effect, role: supporting}
+    - {target: [B4galt1_HKO], reference: [WT], contrast_type: perturbation_vs_control, show_by_default: false,
+       rule: owner 2026-10-28,
+       reason: "The paper links B4GALT1 to PPARG only through the PPARG/ACSL4 axis in MASLD liver, so this knockout is a distant readout of PPARG-dependent genes."}
   optional: []
-  not_primary: []
+  not_shown_by_default: []
   must_be_absent: []
-  expected_default: ["B4galt1_HKO - WT"]  # the only contrast; default via the "no primary" guard
 
 current_run:
   formula: "~0 + genotype"
@@ -41,6 +42,9 @@ current_run:
   required_present: 1  # of 1
   required_missing: []
 
+owner_answers:  # 2026-10-28
+  Q7b: "Roles replaced by show_by_default + reason and an objective contrast_type."
+  Q7c: "show_by_default false for this dataset."
+
 owner_to_confirm:
-  - "Role under the assumed question: supporting (indirect PPARG link, so the dataset gets a 'no direct match' flag) or primary?"
   - "No other contrast is expected; confirm."

@@ -79,39 +79,71 @@ groups:
     characteristics_ch1.3.treatment: "Cells were differentiated into EVTs for 8 days under control (untreated) conditions."
 
 contrasts:
+  # contrast_type: objective, from the list in README.md.
+  # show_by_default + reason: tied to the assumed PPARG question.
   required:
     # Batch1: TSC knockdown and PPARG rescue
-    - {target: [TSC_shPPARG], reference: [TSC_shCtrl], type: main_effect, role: primary}
-    - {target: [TSC_rescue_12p5], reference: [TSC_shPPARG], type: rescue_vs_perturbation, role: primary}
-    - {target: [TSC_rescue_15], reference: [TSC_shPPARG], type: rescue_vs_perturbation, role: primary}
-    - {target: [TSC_rescue_12p5], reference: [TSC_shCtrl], type: rescue_vs_control, role: supporting}
-    - {target: [TSC_rescue_15], reference: [TSC_shCtrl], type: rescue_vs_control, role: supporting}
+    - {target: [TSC_shPPARG], reference: [TSC_shCtrl], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "PPARG knockdown in TSCs directly shows which genes need PPARG."}
+    - {target: [TSC_rescue_12p5], reference: [TSC_shPPARG], contrast_type: rescue_vs_perturbation, show_by_default: true,
+       rule: owner-default 2026-10-28,
+       reason: "Shows whether restoring PPARG (12.5 ng/mL Dox) reverses the knockdown effects."}
+    - {target: [TSC_rescue_15], reference: [TSC_shPPARG], contrast_type: rescue_vs_perturbation, show_by_default: true,
+       rule: owner-default 2026-10-28,
+       reason: "Shows whether restoring PPARG (15 ng/mL Dox) reverses the knockdown effects."}
+    - {target: [TSC_rescue_12p5], reference: [TSC_shCtrl], contrast_type: rescue_vs_control, show_by_default: false,
+       rule: owner-default 2026-10-28,
+       reason: "Tests whether the 12.5 ng/mL rescue is complete; context for the rescue, not the main PPARG effect."}
+    - {target: [TSC_rescue_15], reference: [TSC_shCtrl], contrast_type: rescue_vs_control, show_by_default: false,
+       rule: owner-default 2026-10-28,
+       reason: "Tests whether the 15 ng/mL rescue is complete; context for the rescue, not the main PPARG effect."}
     # Batch2: EVT knockdown and DLX6 rescue
-    - {target: [EVT_shPPARG], reference: [EVT_shCtrl], type: main_effect, role: primary}
-    - {target: [EVT_shPPARG_DLX6], reference: [EVT_shPPARG], type: rescue_vs_perturbation, role: supporting}
-    # Batch3: TSC PPARG antagonist doses
-    - {target: [TSC_T007_0p3uM], reference: [TSC_DMSO], type: dose_vs_control, role: primary}
-    - {target: [TSC_T007_1uM], reference: [TSC_DMSO], type: dose_vs_control, role: primary}
-    - {target: [TSC_T007_3uM], reference: [TSC_DMSO], type: dose_vs_control, role: primary}
-    - {target: [TSC_T007_10uM], reference: [TSC_DMSO], type: dose_vs_control, role: primary}
-    # Batch4: EVT PPARG antagonist, start day
-    - {target: [EVT_T007_D0], reference: [EVT_DMSO], type: main_effect, role: primary}
-    - {target: [EVT_T007_D1], reference: [EVT_DMSO], type: time_vs_baseline, role: supporting}
-    - {target: [EVT_T007_D2], reference: [EVT_DMSO], type: time_vs_baseline, role: supporting}
-    - {target: [EVT_T007_D3], reference: [EVT_DMSO], type: time_vs_baseline, role: supporting}
-    - {target: [EVT_T007_D4], reference: [EVT_DMSO], type: time_vs_baseline, role: supporting}
-    - {target: [EVT_T007_D6], reference: [EVT_DMSO], type: time_vs_baseline, role: supporting}
+    - {target: [EVT_shPPARG], reference: [EVT_shCtrl], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "PPARG knockdown during EVT differentiation directly shows which genes need PPARG there."}
+    - {target: [EVT_shPPARG_DLX6], reference: [EVT_shPPARG], contrast_type: rescue_vs_perturbation, show_by_default: true,
+       rule: owner-default 2026-10-28,
+       reason: "Owner (Q4b): shows whether DLX6 overexpression rescues the PPARG-knockdown effects in EVTs."}
+    # Batch3: TSC PPARG antagonist doses (show_by_default is a draft)
+    - {target: [TSC_T007_0p3uM], reference: [TSC_DMSO], contrast_type: dose_vs_control, show_by_default: true,
+       reason: "Pharmacological PPARG inhibition (0.3 uM T0070907) in TSCs."}
+    - {target: [TSC_T007_1uM], reference: [TSC_DMSO], contrast_type: dose_vs_control, show_by_default: true,
+       reason: "Pharmacological PPARG inhibition (1 uM T0070907) in TSCs."}
+    - {target: [TSC_T007_3uM], reference: [TSC_DMSO], contrast_type: dose_vs_control, show_by_default: true,
+       reason: "Pharmacological PPARG inhibition (3 uM T0070907) in TSCs."}
+    - {target: [TSC_T007_10uM], reference: [TSC_DMSO], contrast_type: dose_vs_control, show_by_default: true,
+       reason: "Pharmacological PPARG inhibition (10 uM T0070907) in TSCs."}
+    # Batch4: EVT PPARG antagonist by start day (show_by_default is a draft)
+    - {target: [EVT_T007_D0], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "PPARG inhibition over the whole EVT differentiation (from day 0)."}
+    - {target: [EVT_T007_D1], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 1); refines the timing of the PPARG requirement shown by day 0."}
+    - {target: [EVT_T007_D2], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 2); refines the timing of the PPARG requirement shown by day 0."}
+    - {target: [EVT_T007_D3], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 3); refines the timing of the PPARG requirement shown by day 0."}
+    - {target: [EVT_T007_D4], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 4); refines the timing of the PPARG requirement shown by day 0."}
+    - {target: [EVT_T007_D6], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 6); refines the timing of the PPARG requirement shown by day 0."}
   optional:
-    # Acceptable when present, never primary.
-    - {target: [EVT_shPPARG_DLX6], reference: [EVT_shCtrl], type: rescue_vs_control, role: supporting}
-    - {target: [EVT_SCH772984], reference: [EVT_untreated], type: main_effect, role: not_relevant}
-    - {target: [EVT_DMOG], reference: [EVT_untreated], type: main_effect, role: not_relevant}
-    - {target: [TSC_T007_0p3uM, TSC_T007_1uM, TSC_T007_3uM, TSC_T007_10uM], reference: [TSC_DMSO], type: average, role: supporting}
-  not_primary:
-    # May exist, but must not be primary or a default.
-    - {target: [TSC_rescue_12p5], reference: [TSC_rescue_15], type: perturbation_vs_perturbation, note: "dose vs dose of the rescue; produced by the 2026-10-07 run"}
-    - {any_pair_within: [TSC_T007_0p3uM, TSC_T007_1uM, TSC_T007_3uM, TSC_T007_10uM], type: perturbation_vs_perturbation}
-    - {any_pair_within: [EVT_T007_D0, EVT_T007_D1, EVT_T007_D2, EVT_T007_D3, EVT_T007_D4, EVT_T007_D6], type: perturbation_vs_perturbation}
+    # Acceptable when present.
+    - {target: [EVT_shPPARG_DLX6], reference: [EVT_shCtrl], contrast_type: rescue_vs_control, show_by_default: false,
+       rule: owner-default 2026-10-28,
+       reason: "Tests whether the DLX6 rescue is complete; context for the rescue."}
+    - {target: [EVT_SCH772984], reference: [EVT_untreated], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "ERK inhibition; not a PPARG perturbation."}
+    - {target: [EVT_DMOG], reference: [EVT_untreated], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Hypoxia mimetic; not a PPARG perturbation."}
+    - {target: [TSC_T007_0p3uM, TSC_T007_1uM, TSC_T007_3uM, TSC_T007_10uM], reference: [TSC_DMSO], contrast_type: average,
+       show_by_default: false, reason: "Pooled PPARG inhibition across doses; the per-dose contrasts are shown instead."}
+  not_shown_by_default:
+    # May exist, but show_by_default must be false.
+    - {target: [TSC_rescue_12p5], reference: [TSC_rescue_15], contrast_type: dose_vs_dose,
+       reason: "Dose vs dose of the rescue; does not show a PPARG effect. Produced by the 2026-10-07 run."}
+    - {any_pair_within: [TSC_T007_0p3uM, TSC_T007_1uM, TSC_T007_3uM, TSC_T007_10uM], contrast_type: dose_vs_dose,
+       reason: "Dose vs dose of the same antagonist."}
+    - {any_pair_within: [EVT_T007_D0, EVT_T007_D1, EVT_T007_D2, EVT_T007_D3, EVT_T007_D4, EVT_T007_D6], contrast_type: other,
+       reason: "Start day vs start day of the same antagonist."}
   must_be_absent:
     - rule: no_cross_block
       block: "characteristics_ch1.4.batch"
@@ -131,16 +163,19 @@ current_run:
     - TSC_rescue_15 - TSC_shPPARG
     - TSC_rescue_12p5 - TSC_shCtrl
     - TSC_rescue_15 - TSC_shCtrl
-  not_primary_present: ["TSC_rescue_12p5 - TSC_rescue_15"]
+  not_shown_by_default_present: ["TSC_rescue_12p5 - TSC_rescue_15"]
   note: >-
     The 13 present are TSC_shPPARG-TSC_shCtrl, EVT_shPPARG-EVT_shCtrl,
     EVT_shPPARG_DLX6-EVT_shPPARG, the 4 TSC doses vs TSC_DMSO and the 6 EVT
     start days vs EVT_DMSO. The run also produced the 4-dose average and
     SCH772984 and DMOG vs EVT_untreated. No contrast crosses a batch.
 
+owner_answers:  # 2026-10-28
+  Q4b: "EVTd8_shPPARG_DLX6Rescue is a rescue arm: DLX6Rescue vs EVT shPPARG, rescue_vs_perturbation, shown by default."
+  Q5: "Replaced by a rule (owner-default 2026-10-28): rescue vs perturbation is shown by default; rescue vs control is in the key with show_by_default false."
+  Q6: "A group with exactly 2 replicates raises a medium review flag (system rule)."
+  Q7b: "Roles replaced by show_by_default + reason and an objective contrast_type."
+
 owner_to_confirm:
-  - "Roles under the assumed question: are the T0070907 dose and start-day contrasts primary, supporting, or only the full-duration (D0) one primary?"
-  - "Is EVTd8_shPPARG_DLX6Rescue a rescue of the PPARG knockdown (compare with EVT_shPPARG first), as the GEO title suggests?"
-  - "Is the 'rescue vs shCtrl' pair supporting (rescue completeness) rather than primary? Plan section 6.6 lists only rescue vs shPPARG and shPPARG vs shCtrl as primary."
+  - "show_by_default for the T0070907 dose contrasts (drafted true) and the start-day contrasts (drafted: day 0 true, later days false)."
   - "Wording: the plan says batch is nested in group; the data show each group nested in one batch. The consequence (batch cannot be a covariate) is the same."
-  - "Are 2 replicates per group accepted for the evaluation, or should n=2 groups always raise a review flag (they do now)?"

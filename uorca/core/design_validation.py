@@ -63,6 +63,7 @@ DropReason = Literal[
     "aliased_with_group",
     "group_nested_in_block",
     "block_nested_in_group",
+    "implied_by_block",
     "confounded",
 ]
 TermRole = Literal["group", "block"]
@@ -252,6 +253,12 @@ def _matrix_rank(matrix: np.ndarray) -> int:
     return int(np.linalg.matrix_rank(matrix)) if matrix.size else 0
 
 
+def _determines(fine: pd.Series, coarse: pd.Series) -> bool:
+    """True when every level of ``fine`` lies in one level of ``coarse``."""
+    table = pd.crosstab(fine.astype(str), coarse.astype(str)) > 0
+    return bool((table.sum(axis=1) == 1).all())
+
+
 def _classify_block(
     group: pd.Series, block: pd.Series
 ) -> tuple[DropReason | None, dict[str, str] | None]:
@@ -287,6 +294,11 @@ def _drop_reason_text(code: DropReason, column: str, detail: str = "") -> str:
             f"Each level of '{column}' lies in one group only (the block is nested "
             "in the group), so it cannot be a fixed covariate next to ~0 + group. "
             "A random-effect method such as duplicateCorrelation would be needed."
+        ),
+        "implied_by_block": (
+            f"'{column}' is determined by another kept block{detail} (each level of "
+            "that block lies in one level of this one), so its effect is already "
+            "in the design. Example: cell line inside a cell line x replicate pair."
         ),
         "confounded": (
             f"Adding '{column}' makes the design matrix rank-deficient{detail}; it is "
@@ -393,6 +405,7 @@ def validate_design(
         )
 
     kept_blocks: dict[str, pd.Series] = {}
+    candidates: dict[str, pd.Series] = {}
     for col in requested_blocks:
         block = string_column(samples, col)
         n_levels = int(block.nunique())
@@ -407,6 +420,32 @@ def validate_design(
             logger.info("Design: dropping block %r: %s", col, reason)
             dropped.append(DroppedTerm(col, "block", code, reason, n_levels, mapping))
             continue
+        candidates[col] = block
+
+    # A block that another candidate block determines (cell line, when a
+    # cell line x replicate pair block is also requested) adds nothing; drop
+    # it so the finer block is kept. For identical partitions keep the first.
+    implied: dict[str, str] = {}
+    names = list(candidates)
+    for col in names:
+        for other in names:
+            if other == col or other in implied:
+                continue
+            if _determines(candidates[other], candidates[col]) and (
+                not _determines(candidates[col], candidates[other])
+                or names.index(other) < names.index(col)
+            ):
+                implied[col] = other
+                break
+    for col, block in candidates.items():
+        if col in implied:
+            reason = _drop_reason_text("implied_by_block", col, f" ('{implied[col]}')")
+            logger.info("Design: dropping block %r: %s", col, reason)
+            dropped.append(
+                DroppedTerm(col, "block", "implied_by_block", reason, int(block.nunique()))
+            )
+            continue
+        n_levels = int(block.nunique())
         trial = {**kept_blocks, col: block}
         matrix, _ = build_design_matrix(group, trial)
         if _matrix_rank(matrix) < matrix.shape[1]:
