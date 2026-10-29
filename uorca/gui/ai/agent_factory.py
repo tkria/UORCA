@@ -24,7 +24,6 @@ from .config_loader import get_ai_agent_config, get_mcp_server_config
 from uorca.ai_provider import get_model
 
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerStdio
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +41,11 @@ def create_uorca_agent(selected_contrasts_key: str = "") -> Optional[Agent]:
     Args:
         selected_contrasts_key: String representation of selected contrasts for cache invalidation
     """
+    # Imported here, not at module level, so importing this module does not load `mcp` (which
+    # loads pywin32 at import time on Windows). This alone does not keep `mcp` out of the AI
+    # tab: ai_assistant_tab.py still imports uorca.gui.mcp_server, which imports `mcp`, at
+    # module level. A failure there is contained by the tab guard (render_tab_safely).
+    from pydantic_ai.mcp import MCPServerStdio
 
     # Load configuration
     ai_config = get_ai_agent_config()

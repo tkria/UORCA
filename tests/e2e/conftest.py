@@ -3,11 +3,17 @@
 Run with:  uv run --group e2e pytest -m e2e -p no:cacheprovider --no-cov -q
 The tests skip when not selected with ``-m e2e``, when Playwright is not installed, or when
 its Chromium build is missing.
+
+When a test fails, a full-page screenshot and each Streamlit log it produced are copied to
+``$UORCA_E2E_ARTIFACTS_DIR/<test name>/`` (CI uploads that folder). Without the variable they
+stay in the test's own tmp_path.
 """
 
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -30,6 +36,29 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "e2e" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Record each phase's report on the item, so fixtures can tell if the test failed."""
+    outcome = yield
+    rep = outcome.get_result()
+    setattr(item, f"rep_{rep.when}", rep)
+
+
+def _failed(request) -> bool:
+    return any(getattr(getattr(request.node, f"rep_{when}", None), "failed", False)
+               for when in ("setup", "call"))
+
+
+@pytest.fixture
+def artifacts_dir(request, tmp_path) -> Path:
+    """Where this test's screenshots and logs go (see the module docstring)."""
+    root = os.environ.get("UORCA_E2E_ARTIFACTS_DIR")
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", request.node.name)
+    d = Path(root) / safe if root else tmp_path / "artifacts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def _free_port() -> int:
@@ -60,6 +89,7 @@ def _start_app(home: Path, extra_env: Optional[dict[str, str]] = None) -> App:
     env = {k: v for k, v in os.environ.items() if not k.startswith("UORCA_")}
     env.update({
         "HOME": str(home),
+        "USERPROFILE": str(home),  # Path.home() reads USERPROFILE on Windows
         "STREAMLIT_BROWSER_GATHER_USAGE_STATS": "false",
         "PYTHONUNBUFFERED": "1",
     })
@@ -97,7 +127,7 @@ def home(tmp_path) -> Path:
 
 
 @pytest.fixture
-def start_app(home) -> Iterator[Callable[..., App]]:
+def start_app(home, request, artifacts_dir) -> Iterator[Callable[..., App]]:
     apps: list[App] = []
 
     def _start(extra_env: Optional[dict[str, str]] = None) -> App:
@@ -108,6 +138,9 @@ def start_app(home) -> Iterator[Callable[..., App]]:
     yield _start
     for app in apps:
         app.stop()
+    if _failed(request):
+        for app in apps:
+            shutil.copy(app.log, artifacts_dir / app.log.name)
 
 
 @pytest.fixture(scope="session")
@@ -123,9 +156,13 @@ def browser():
 
 
 @pytest.fixture
-def page(browser):
+def page(browser, start_app, request, artifacts_dir):
+    # Depends on start_app so it is torn down first: the failure screenshot is taken while
+    # the app is still running.
     context = browser.new_context(viewport={"width": 1400, "height": 1000})
     pg = context.new_page()
     pg.set_default_timeout(30_000)
     yield pg
+    if _failed(request):
+        pg.screenshot(path=str(artifacts_dir / "failure.png"), full_page=True)
     context.close()
