@@ -402,3 +402,40 @@ def test_gse295568_legacy_contrasts_with_micro_sign_run(tmp_path):
     proc = _run(args, tmp_path)
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert _contrast_folders(tmp_path) == {str(n).replace(".", "_") for n in real["name"]}
+
+
+def _cpm_columns(tmp: Path) -> list[str]:
+    return [c for c in pd.read_csv(tmp / "RNAseqAnalysis" / "CPM.csv", nrows=0).columns if c != "Gene"]
+
+
+def test_cpm_columns_are_named_by_gsm_in_table_order(tmp_path):
+    """CPM.csv used the DGEList() defaults Sample1..N; it now uses the GSM accession."""
+    args = _write_inputs(tmp_path, ["A", "B"], group_col="uorca_group", contrasts=None, up_levels={"B": 8.0})
+    proc = _run(args, tmp_path)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert _cpm_columns(tmp_path) == [f"GSM{i}" for i in range(1, 7)]
+    # The up gene is high in the B samples (rows 4-6) by name, not only by position.
+    cpm = pd.read_csv(tmp_path / "RNAseqAnalysis" / "CPM.csv").set_index("Gene")
+    assert cpm.loc[UP_GENE, ["GSM4", "GSM5", "GSM6"]].min() > cpm.loc[UP_GENE, ["GSM1", "GSM2", "GSM3"]].max()
+
+
+def test_repeated_gsm_names_samples_by_run_accession(tmp_path):
+    """Several runs per GSM: the GSM is not unique, so the run accession names each sample."""
+    args = _write_inputs(tmp_path, ["A", "B"], group_col="uorca_group", contrasts=None)
+    table_path = tmp_path / "metadata" / "edger_analysis_samples.csv"
+    table = pd.read_csv(table_path, index_col=0)
+    table["geo_accession"] = ["GSM1", "GSM1", "GSM2", "GSM3", "GSM3", "GSM4"]
+    table["SRR"] = [f"SRR{i}" for i in range(10, 16)]
+    table.to_csv(table_path)
+    proc = _run(args, tmp_path)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert _cpm_columns(tmp_path) == [f"SRR{i}" for i in range(10, 16)]
+
+
+def test_no_id_column_keeps_default_sample_names(tmp_path):
+    args = _write_inputs(tmp_path, ["A", "B"], group_col="uorca_group", contrasts=None)
+    table_path = tmp_path / "metadata" / "edger_analysis_samples.csv"
+    pd.read_csv(table_path, index_col=0).drop(columns=["geo_accession"]).to_csv(table_path)
+    proc = _run(args, tmp_path)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert _cpm_columns(tmp_path) == [f"Sample{i}" for i in range(1, 7)]

@@ -684,16 +684,36 @@ if (tx2gene_file != "NA" && file.exists(tx2gene_file)) {
     use_tx2gene <- FALSE
 }
 
+# Name each sample, so that the DGEList and CPM.csv use sample IDs instead of the
+# DGEList() defaults Sample1..N. The rule is the same as in
+# uorca/gui/sample_names.py: the first of geo_accession, GSM and SRR whose values
+# are all present and unique. With none of them, the defaults stay.
+sample_ids_for_rows <- function(metadata) {
+    for (col in c("geo_accession", "GSM", "SRR")) {
+        if (col %in% colnames(metadata)) {
+            ids <- trimws(as.character(metadata[[col]]))
+            if (!any(is.na(ids) | ids == "") && !anyDuplicated(ids)) {
+                cat("Naming samples by the '", col, "' column\n", sep = "")
+                return(ids)
+            }
+        }
+    }
+    cat("No unique sample ID column; samples keep the names Sample1..N\n")
+    paste0("Sample", seq_len(nrow(metadata)))
+}
+abundance_files <- metadata$abundance_file
+names(abundance_files) <- sample_ids_for_rows(metadata)
+
 cat("Step 3: Importing Kallisto quantification data using tximport...\n")
 cat("Importing Kallisto quantification data...\n")
 if (use_tx2gene) {
-    kallisto <- tximport(metadata$abundance_file,
+    kallisto <- tximport(abundance_files,
         type = "kallisto",
         tx2gene = tx2gene, countsFromAbundance = "lengthScaledTPM",
         ignoreAfterBar = TRUE
     )
 } else {
-    kallisto <- tximport(metadata$abundance_file,
+    kallisto <- tximport(abundance_files,
         type = "kallisto",
         txOut = TRUE, ignoreAfterBar = TRUE
     )
