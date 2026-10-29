@@ -38,6 +38,9 @@ echo "Using temporary directory: ${TEMP_DIR}"
 BIND="-B {{ project_root }}:/workspace \
       -B {{ output_dir }}:/UORCA_results \
       -B ${TEMP_DIR}:/tmp"
+{{ apptainer_binds }}
+
+{{ apptainer_env }}
 
 echo "[$(date)] Starting agentic workflow via Apptainer for {{ accession }}"
 
@@ -47,9 +50,6 @@ apptainer exec \
   --tmpdir=${TEMP_DIR} \
   --cleanenv \
   --env SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK}" \
-  --env OPENAI_API_KEY="${OPENAI_API_KEY}" \
-  --env ENTREZ_EMAIL="${ENTREZ_EMAIL}" \
-  --env ENTREZ_API_KEY="${ENTREZ_API_KEY}" \
   --env PYTHONPATH="/workspace" \
   $CONTAINER_IMAGE \
   bash -lc "\
@@ -63,6 +63,8 @@ apptainer exec \
 {% else %}
 echo "[$(date)] Starting agentic workflow via Docker for {{ accession }}"
 
+{{ docker_env }}
+
 # Run Docker container with temp filesystem and proper mounts
 docker run --rm \
   --tmpfs /tmp:rw,size=20g \
@@ -74,9 +76,7 @@ docker run --rm \
   -e UV_NO_SYNC=1 \
   -e PATH=/workspace/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   -e VIRTUAL_ENV=/workspace/.venv \
-  -e ENTREZ_EMAIL="${ENTREZ_EMAIL}" \
-  -e OPENAI_API_KEY="${OPENAI_API_KEY}" \
-  -e ENTREZ_API_KEY="${ENTREZ_API_KEY}" \
+  "${DOCKER_AI_ARGS[@]}" \
   $DOCKER_IMAGE \
   python -m uorca.graph.runner \
     --accession {{ accession }} \

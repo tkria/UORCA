@@ -70,7 +70,7 @@ Not an independent workflow anymore; the graph nodes import `*_core` functions f
 - **`base.py`** — abstract batch processing interface
 - **`slurm.py`** — SLURM submission, resource management, job monitoring
 - **`local.py`** — local multiprocessing with resource detection and bind-mounted temp dirs
-- **`templates/`** — `run_single_dataset.sbatch.j2`, `run_dataset_array.sbatch.j2`
+- **`templates/`** — `run_single_dataset.sbatch.j2`
 
 ### 5. Dataset Identification — `uorca/identification/`
 

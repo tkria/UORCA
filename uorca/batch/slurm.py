@@ -17,7 +17,10 @@ from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
+from uorca.ai_provider import container_env
+
 from .base import BatchProcessor
+from .container_env import apptainer_binds_shell, apptainer_env_shell, docker_env_shell
 
 
 class SlurmBatchProcessor(BatchProcessor):
@@ -248,12 +251,13 @@ class SlurmBatchProcessor(BatchProcessor):
 
             # Write temporary script file
             script_file = Path(output_dir) / f"{accession}_UORCA.sbatch"
-            with open(script_file, 'w') as f:
+            # UTF-8: the template has non-ASCII text, and Windows defaults to its ANSI code page.
+            with open(script_file, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(script_content)
 
             # Submit job
             result = subprocess.run(
-                ['sbatch', str(script_file)],
+                ['sbatch', '--export=ALL', str(script_file)],
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -326,12 +330,13 @@ class SlurmBatchProcessor(BatchProcessor):
             # sequential submissions never overwrite each other's sbatch scripts.
             identity = Path(config.user_data.fastq_dir).name or "user"
             script_file = output_dir / f"temp_submit_user_data__{identity}.sbatch"
-            with open(script_file, 'w') as f:
+            # UTF-8: the template has non-ASCII text, and Windows defaults to its ANSI code page.
+            with open(script_file, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(script_content)
 
             # Submit job
             result = subprocess.run(
-                ['sbatch', str(script_file)],
+                ['sbatch', '--export=ALL', str(script_file)],
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -401,6 +406,8 @@ class SlurmBatchProcessor(BatchProcessor):
         else:
             container_image = params.get('docker_image', 'kevingchen/uorca:0.1.0')
 
+        cenv = container_env()
+
         # Generate job name from config file
         config_name = Path(user_config_path).stem.replace('_config', '').replace('_test', '')
         job_name = f"uorca_{config_name}"[:40]  # SLURM job name limit
@@ -433,6 +440,9 @@ echo "Using temporary directory: ${{TEMP_DIR}}"
 # Bind-mounts for Apptainer (all paths from config)
 BIND="{bind_mounts} \\
       -B ${{TEMP_DIR}}:/tmp"
+{apptainer_binds_shell(cenv, project_root.resolve(), str(project_root.resolve()))}
+
+{apptainer_env_shell(cenv)}
 
 echo "[$(date)] Starting user data workflow via Apptainer"
 
@@ -441,9 +451,6 @@ apptainer exec \\
   --tmpdir=${{TEMP_DIR}} \\
   --cleanenv \\
   --env SLURM_CPUS_PER_TASK="${{SLURM_CPUS_PER_TASK}}" \\
-  --env OPENAI_API_KEY="${{OPENAI_API_KEY}}" \\
-  --env ENTREZ_EMAIL="${{ENTREZ_EMAIL}}" \\
-  --env ENTREZ_API_KEY="${{ENTREZ_API_KEY}}" \\
   --env LOGFIRE_IGNORE_NO_CONFIG=1 \\
   $CONTAINER_IMAGE \\
   bash -lc "cd {project_root.resolve()} && uv run python -m uorca.graph.runner --config {user_config_abs}"
@@ -489,8 +496,13 @@ rm -rf ${{TEMP_DIR}}
         else:
             container_image = params.get('docker_image', 'kevingchen/uorca:0.1.0')
 
+        cenv = container_env()
+
         # Render template with parameters
         script_content = template.render(
+            apptainer_env=apptainer_env_shell(cenv),
+            apptainer_binds=apptainer_binds_shell(cenv, project_root.resolve(), "/workspace"),
+            docker_env=docker_env_shell(cenv, project_root.resolve(), "/workspace/src"),
             accession=accession,
             output_dir=output_dir,
             logs_dir=logs_dir,
