@@ -1,0 +1,50 @@
+# Expected design and contrasts for GSE166308. Schema: README.md in this folder.
+accession: GSE166308
+status: "draft — owner to confirm"
+drafted: "2026-10-27"
+drafted_by: "Claude agent, from the stored metadata; not reviewed by the owner"
+sources:
+  metadata: results/20261007_PPARg/GSE166308/metadata/GSE166308_metadata.csv
+  current_contrasts: results/20261007_PPARg/GSE166308/metadata/contrasts.csv
+  fixture: tests/fixtures/contrast_design/GSE166308_samples.csv
+research_question_assumed: >-
+  Which genes and pathways depend on PPARG activity? (Effects of losing,
+  inhibiting or restoring PPARG.)
+difficulty: simple
+
+design:
+  # C57BL/6 strain, tissue and cell population are constant. 3 vs 3.
+  group_columns: ["characteristics_ch1.1.genotype"]
+  required_blocks: []
+  expected_formula: "~0 + group"
+  expected_residual_df: 4
+  needs_review_expected: false
+
+groups:
+  Pim1_KO:
+    characteristics_ch1.1.genotype: "Pim1-/-"
+  WT:
+    characteristics_ch1.1.genotype: "WT"
+
+contrasts:
+  required:
+    # Pim1 knockout MDSCs vs wild type. PIM1 is upstream of PPARG-mediated activity, so this is indirect evidence on PPARG.
+    - {target: [Pim1_KO], reference: [WT], contrast_type: perturbation_vs_control, show_by_default: true,
+       rule: owner 2026-10-28,
+       reason: "Loss of PIM1 removes PPARG-mediated lipid oxidation in MDSCs (enforced PPARG rescues it), so this contrast shows PPARG-dependent genes indirectly."}
+  optional: []
+  not_shown_by_default: []
+  must_be_absent: []
+
+current_run:
+  formula: "~0 + genotype"
+  contrasts: 1
+  required_present: 1  # of 1
+  required_missing: []
+
+owner_answers:  # 2026-10-28
+  Q7b: "Roles replaced by show_by_default + reason and an objective contrast_type."
+  Q7c: "show_by_default true for this dataset."
+
+owner_to_confirm:
+  - "No other contrast is expected; confirm."

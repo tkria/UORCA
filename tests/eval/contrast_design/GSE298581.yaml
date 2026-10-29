@@ -1,0 +1,129 @@
+# Expected design and contrasts for GSE298581. Schema: README.md in this folder.
+accession: GSE298581
+status: "draft — owner to confirm"
+drafted: "2026-10-27"
+drafted_by: "Claude agent, from the stored metadata; not reviewed by the owner"
+sources:
+  metadata: results/20261007_PPARg/GSE298581/metadata/GSE298581_metadata.csv
+  current_contrasts: results/20261007_PPARg/GSE298581/metadata/contrasts.csv
+  fixture: tests/fixtures/contrast_design/GSE298581_samples.csv
+research_question_assumed: >-
+  Which genes and pathways depend on PPARG activity? (Effects of losing,
+  inhibiting or restoring PPARG.)
+difficulty: difficult
+
+design:
+  # 48 samples = 3 cell lines (5637, HT1197, UMUC9) x 4 treatments x 4
+  # replicates, fully balanced (checked in the metadata).
+  # Owner, 2026-10-28 (Q2): replicate number is a pairing factor. Each
+  # (cell line, replicate) pair is a block; cell line is nested in it.
+  derived_columns:
+    pair: ["characteristics_ch1.0.cell line", "characteristics_ch1.5.replicate"]  # joined with "_", 12 levels
+  group_columns: ["characteristics_ch1.3.treatment"]
+  required_blocks: ["pair"]
+  must_drop:
+    - column: "characteristics_ch1.0.cell line"
+      reason_code: implied_by_block  # the pair block already contains it
+    - column: "characteristics_ch1.6.batch"
+      reason_code: single_level
+  expected_formula: "~0 + group + pair"
+  # Verified with validate_design and with R model.matrix + qr: 15 columns,
+  # rank 15, residual df 48 - 4 - 11 = 33.
+  expected_residual_df: 33
+  needs_review_expected: true  # under the current one-factor design
+
+groups:
+  DMSO:
+    characteristics_ch1.3.treatment: "DMSO"
+  T0070907:
+    characteristics_ch1.3.treatment: "0.5 uM T0070907"
+  FTX6746:
+    characteristics_ch1.3.treatment: "0.5 uM FTX-6746"
+  FX909:
+    characteristics_ch1.3.treatment: "0.5 uM FX-909"
+
+contrasts:
+  required:
+    - {target: [T0070907], reference: [DMSO], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "Owner (Q3): PPARG inhibition by T0070907 vs vehicle, across the three cell lines."}
+    - {target: [FTX6746], reference: [DMSO], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "Owner (Q3): PPARG inverse agonism by FTX-6746 vs vehicle, across the three cell lines."}
+    - {target: [FX909], reference: [DMSO], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "Owner (Q3): PPARG inverse agonism by the clinical compound FX-909 vs vehicle, across the three cell lines."}
+  optional:
+    - {target: [T0070907, FTX6746, FX909], reference: [DMSO], contrast_type: average, show_by_default: false,
+       reason: "Pooled PPARG inhibition; the per-drug contrasts are shown instead."}
+  not_shown_by_default:
+    - {any_pair_within: [T0070907, FTX6746, FX909], contrast_type: drug_vs_drug,
+       reason: "Drug vs drug compares compounds, not PPARG activity against a control."}
+  must_be_absent: []
+
+# Owner, 2026-10-28 (Q1): test drug x cell line effects too.
+# Chosen form: per-cell-line drug-vs-DMSO pairwise contrasts. The contrast
+# checks accept both this form and the interaction form (a four-group
+# +1/+1/-1/-1 contrast, e.g. (FX909_5637 - DMSO_5637) - (FX909_UMUC9 -
+# DMSO_UMUC9)); pairwise was chosen because each contrast reads directly as
+# "the drug effect in this line", and the interactions follow from them.
+cell_line_effects:
+  group_columns: ["characteristics_ch1.3.treatment", "characteristics_ch1.0.cell line"]  # 12 groups
+  blocks: ["pair"]
+  # validate_design today: the pair block is dropped as confounded, because
+  # every pair lies in one cell line and cell line is part of the group, so
+  # whole-block treatment coding of pair is rank-deficient. The intended
+  # design codes pair within cell line (12 group + 9 pair columns, rank 21,
+  # residual df 27, checked with numpy). That needs design_validation and
+  # RNAseq.R support that does not exist yet (escalated).
+  current_validate_design: {formula: "~0 + group", residual_df: 36, dropped: {pair: confounded}}
+  intended_residual_df: 27
+  groups:
+    DMSO_5637: {characteristics_ch1.3.treatment: "DMSO", characteristics_ch1.0.cell line: "5637"}
+    T0070907_5637: {characteristics_ch1.3.treatment: "0.5 uM T0070907", characteristics_ch1.0.cell line: "5637"}
+    FTX6746_5637: {characteristics_ch1.3.treatment: "0.5 uM FTX-6746", characteristics_ch1.0.cell line: "5637"}
+    FX909_5637: {characteristics_ch1.3.treatment: "0.5 uM FX-909", characteristics_ch1.0.cell line: "5637"}
+    DMSO_HT1197: {characteristics_ch1.3.treatment: "DMSO", characteristics_ch1.0.cell line: "HT1197"}
+    T0070907_HT1197: {characteristics_ch1.3.treatment: "0.5 uM T0070907", characteristics_ch1.0.cell line: "HT1197"}
+    FTX6746_HT1197: {characteristics_ch1.3.treatment: "0.5 uM FTX-6746", characteristics_ch1.0.cell line: "HT1197"}
+    FX909_HT1197: {characteristics_ch1.3.treatment: "0.5 uM FX-909", characteristics_ch1.0.cell line: "HT1197"}
+    DMSO_UMUC9: {characteristics_ch1.3.treatment: "DMSO", characteristics_ch1.0.cell line: "UMUC9"}
+    T0070907_UMUC9: {characteristics_ch1.3.treatment: "0.5 uM T0070907", characteristics_ch1.0.cell line: "UMUC9"}
+    FTX6746_UMUC9: {characteristics_ch1.3.treatment: "0.5 uM FTX-6746", characteristics_ch1.0.cell line: "UMUC9"}
+    FX909_UMUC9: {characteristics_ch1.3.treatment: "0.5 uM FX-909", characteristics_ch1.0.cell line: "UMUC9"}
+  required:
+    - {target: [T0070907_5637], reference: [DMSO_5637], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+    - {target: [FTX6746_5637], reference: [DMSO_5637], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+    - {target: [FX909_5637], reference: [DMSO_5637], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+    - {target: [T0070907_HT1197], reference: [DMSO_HT1197], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+    - {target: [FTX6746_HT1197], reference: [DMSO_HT1197], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+    - {target: [FX909_HT1197], reference: [DMSO_HT1197], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+    - {target: [T0070907_UMUC9], reference: [DMSO_UMUC9], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+    - {target: [FTX6746_UMUC9], reference: [DMSO_UMUC9], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+    - {target: [FX909_UMUC9], reference: [DMSO_UMUC9], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Drug effect in one cell line; detail behind the pooled drug-vs-DMSO contrast (draft)."}
+
+current_run:
+  formula: "~0 + treatment_group"
+  residual_df: 44
+  contrasts: 6
+  required_present: 3  # of 3
+  required_missing: []
+  not_shown_by_default_present: ["FX909 - T0070907", "FX909 - FTX6746", "FTX6746 - T0070907"]
+  note: >-
+    The contrasts were right; the design was not. Cell-line variance went
+    into the residual because cell line was not a block.
+
+owner_answers:  # 2026-10-28
+  Q1: "Test drug x cell line effects: added as per-cell-line contrasts (cell_line_effects)."
+  Q2: "Replicate is a pairing factor: pair = cell line x replicate is the block."
+  Q3: "All three drug-vs-DMSO contrasts stay required and shown by default."
+  Q7b: "Roles replaced by show_by_default + reason and an objective contrast_type."
+
+owner_to_confirm:
+  - "show_by_default for the per-cell-line contrasts (drafted false)."

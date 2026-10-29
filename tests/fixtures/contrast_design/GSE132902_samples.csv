@@ -1,0 +1,7 @@
+GSM,title,characteristics_ch1.0.tissue,characteristics_ch1.1.subtype,characteristics_ch1.2.treatment,uorca_group
+GSM3895945,C1: vehicle,4T1 cells,Triple Negative Breast Cancer (TNBC),vehicle,vehicle
+GSM3895946,C2: vehicle,4T1 cells,Triple Negative Breast Cancer (TNBC),vehicle,vehicle
+GSM3895947,C3: vehicle,4T1 cells,Triple Negative Breast Cancer (TNBC),vehicle,vehicle
+GSM3895948,T1: Roscovitine,4T1 cells,Triple Negative Breast Cancer (TNBC),Roscovitine,Roscovitine
+GSM3895949,T2: Roscovitine,4T1 cells,Triple Negative Breast Cancer (TNBC),Roscovitine,Roscovitine
+GSM3895950,T3: Roscovitine,4T1 cells,Triple Negative Breast Cancer (TNBC),Roscovitine,Roscovitine

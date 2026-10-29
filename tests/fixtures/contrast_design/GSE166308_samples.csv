@@ -1,0 +1,7 @@
+GSM,title,characteristics_ch1.0.strain,characteristics_ch1.1.genotype,characteristics_ch1.2.tissue,characteristics_ch1.3.cell population,uorca_group
+GSM5068357,MDSC-PIM-WT-1,C57BL/6,WT,Bone-marrow-derived MDSCs,CD11b+ Gr1+,WT
+GSM5068358,MDSC-PIM-WT-2,C57BL/6,WT,Bone-marrow-derived MDSCs,CD11b+ Gr1+,WT
+GSM5068359,MDSC-PIM-WT-3,C57BL/6,WT,Bone-marrow-derived MDSCs,CD11b+ Gr1+,WT
+GSM5068360,MDSC-PIM-KO-1,C57BL/6,Pim1-/-,Bone-marrow-derived MDSCs,CD11b+ Gr1+,Pim1-/-
+GSM5068361,MDSC-PIM-KO-2,C57BL/6,Pim1-/-,Bone-marrow-derived MDSCs,CD11b+ Gr1+,Pim1-/-
+GSM5068362,MDSC-PIM-KO-3,C57BL/6,Pim1-/-,Bone-marrow-derived MDSCs,CD11b+ Gr1+,Pim1-/-
