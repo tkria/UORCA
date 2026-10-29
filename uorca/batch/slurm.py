@@ -251,7 +251,8 @@ class SlurmBatchProcessor(BatchProcessor):
 
             # Write temporary script file
             script_file = Path(output_dir) / f"{accession}_UORCA.sbatch"
-            with open(script_file, 'w') as f:
+            # UTF-8: the template has non-ASCII text, and Windows defaults to its ANSI code page.
+            with open(script_file, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(script_content)
 
             # Submit job
@@ -329,7 +330,8 @@ class SlurmBatchProcessor(BatchProcessor):
             # sequential submissions never overwrite each other's sbatch scripts.
             identity = Path(config.user_data.fastq_dir).name or "user"
             script_file = output_dir / f"temp_submit_user_data__{identity}.sbatch"
-            with open(script_file, 'w') as f:
+            # UTF-8: the template has non-ASCII text, and Windows defaults to its ANSI code page.
+            with open(script_file, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(script_content)
 
             # Submit job

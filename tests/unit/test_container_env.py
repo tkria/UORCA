@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -102,6 +103,8 @@ def host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         for name in _ALL_VARS:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("HOME", str(home))
+        # Path.home() reads USERPROFILE on Windows, not HOME.
+        monkeypatch.setenv("USERPROFILE", str(home))
         config_path = home / ".uorca" / "config.yaml"
         if case.config is not None:
             config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -414,6 +417,7 @@ def test_every_builder_refuses_an_invalid_name(tmp_path, where):
             build()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Apptainer binds are a Linux shell snippet")
 def test_aws_bind_quotes_home_with_spaces(tmp_path):
     """$HOME stays one argument: APPTAINER_BIND, not the word-split $BIND string."""
     from uorca.batch import container_env as ce
