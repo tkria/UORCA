@@ -112,7 +112,10 @@ def test_existing_pages_still_load(page, start_app):
                          ("Home", "Welcome to UORCA Explorer")]:
         _nav(page, name)
         page.get_by_text(marker).first.wait_for()
+        _wait_idle(page)
+        # The page guard turns a crash into an st.error box, so check for both.
         _assert_no_exception(page)
+        _assert_no_error_alert(page)
 
 
 def test_gui_import_into_new_project_from_explore(page, start_app, home, tmp_path):
@@ -146,17 +149,21 @@ def test_gui_import_into_new_project_from_explore(page, start_app, home, tmp_pat
     page.get_by_text("Identify Datasets").first.wait_for()
     page.get_by_text("Fake title one").first.wait_for(state="attached")  # dataframe cell (canvas grid)
     _assert_no_exception(page)
+    _assert_no_error_alert(page)
     _nav(page, "Run")
     page.get_by_text("Pipeline Monitor").wait_for()
     page.get_by_text(pipe_run.id).first.wait_for()
     _assert_no_exception(page)
+    _assert_no_error_alert(page)
     _nav(page, "Project Setup")
     page.get_by_text("Create New Project").first.wait_for()
     _assert_no_exception(page)
+    _assert_no_error_alert(page)
     _nav(page, "Home")
     page.get_by_text("Recent Activity").wait_for()
     page.get_by_text(id_run.id).first.wait_for()
     _assert_no_exception(page)
+    _assert_no_error_alert(page)
 
 
 def test_gui_import_into_active_project_from_project_setup(page, start_app, home, tmp_path):

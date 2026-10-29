@@ -8,6 +8,25 @@ import threading
 
 from uorca.core.task_manager import TaskManager, TaskStatus
 
+DONE = (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+
+
+def wait_until(condition, timeout=10.0, interval=0.02):
+    """Poll until condition() is true or the timeout passes.
+
+    Tasks run in background threads, so a fixed sleep is a race on a slow CI
+    runner. After a timeout the caller's assert reports the state it saw.
+    """
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if condition():
+            return
+        time.sleep(interval)
+
+
+def wait_done(manager, *task_ids):
+    wait_until(lambda: all((manager.get_task_status(t) or {}).get("status") in DONE for t in task_ids))
+
 
 @pytest.fixture
 def temp_db():
@@ -48,8 +67,7 @@ def test_task_submission(temp_db):
 
     assert task_id == "test_1"
 
-    # Wait for completion
-    time.sleep(0.3)
+    wait_done(manager, task_id)
 
     status = manager.get_task_status(task_id)
     assert status["status"] == TaskStatus.COMPLETED
@@ -80,7 +98,7 @@ def test_progress_tracking(temp_db):
         on_progress=on_progress
     )
 
-    time.sleep(0.4)
+    wait_done(manager, task_id)
 
     assert len(progress_updates) >= 4
     assert progress_updates[-1][0] >= 0.75
@@ -100,7 +118,7 @@ def test_error_handling(temp_db):
         parameters={}
     )
 
-    time.sleep(0.2)
+    wait_done(manager, task_id)
 
     status = manager.get_task_status(task_id)
     assert status["status"] == TaskStatus.FAILED
@@ -125,7 +143,7 @@ def test_concurrent_tasks(temp_db):
         )
         task_ids.append(task_id)
 
-    time.sleep(0.3)
+    wait_done(manager, *task_ids)
 
     for task_id in task_ids:
         status = manager.get_task_status(task_id)
@@ -147,7 +165,7 @@ def test_persistence(temp_db):
         parameters={}
     )
 
-    time.sleep(0.2)
+    wait_done(manager1, task_id)
 
     # Reset singleton and create new manager instance
     TaskManager._instance = None
@@ -170,7 +188,7 @@ def test_list_tasks_filtering(temp_db):
     manager.submit_task("pipeline_1", "pipeline", quick_task, {})
     manager.submit_task("identify_2", "identify", quick_task, {})
 
-    time.sleep(0.2)
+    wait_done(manager, "identify_1", "pipeline_1", "identify_2")
 
     # Filter by type
     identify_tasks = manager.list_tasks(task_type="identify")
@@ -193,7 +211,7 @@ def test_list_tasks_limit(temp_db):
     for i in range(20):
         manager.submit_task(f"task_{i}", "test", quick_task, {})
 
-    time.sleep(0.5)
+    wait_done(manager, *[f"task_{i}" for i in range(20)])
 
     # Test limit
     tasks = manager.list_tasks(limit=5)
@@ -256,7 +274,7 @@ def test_task_timestamps(temp_db):
         parameters={}
     )
 
-    time.sleep(0.3)
+    wait_done(manager, task_id)
 
     tasks = manager.list_tasks()
     task = next((t for t in tasks if t["task_id"] == "timestamp_test"), None)
@@ -326,7 +344,7 @@ def test_on_complete_callback(temp_db):
         on_complete=on_complete
     )
 
-    time.sleep(0.2)
+    wait_until(lambda: len(completed_results) >= 1)
 
     assert len(completed_results) == 1
     assert completed_results[0] == "result_value"
@@ -352,7 +370,7 @@ def test_on_error_callback(temp_db):
         on_error=on_error
     )
 
-    time.sleep(0.2)
+    wait_until(lambda: len(error_exceptions) >= 1)
 
     assert len(error_exceptions) == 1
     assert isinstance(error_exceptions[0], RuntimeError)

@@ -192,9 +192,12 @@ def build_streamlit_command(explorer_script, port: int, host: str) -> list[str]:
 
     ``--server.headless`` is always ``true`` (see ``main``); ``--headless`` on the UORCA
     CLI only controls whether UORCA opens a browser (``should_open_browser``).
+
+    Streamlit runs as ``<this python> -m streamlit``: the same environment as UORCA, and no
+    ``streamlit.exe`` shim, which some Windows application-control policies block.
     """
     return [
-        'uv', 'run', 'streamlit', 'run',
+        sys.executable, '-m', 'streamlit', 'run',
         str(explorer_script),
         '--server.port', str(port),
         '--server.address', host,
@@ -366,9 +369,8 @@ def main(results_dir=None, port=8501, host="127.0.0.1", headless=False):
     except subprocess.CalledProcessError as e:
         print(f"\nError: Failed to start UORCA Explorer: {e}")
         sys.exit(1)
-    except FileNotFoundError:
-        print("\nError: Could not find 'uv' command.")
-        print("Make sure you're in the UORCA environment with uv installed.")
+    except FileNotFoundError as e:
+        print(f"\nError: Could not start Streamlit with {sys.executable}: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n\nStopping UORCA Explorer...")
