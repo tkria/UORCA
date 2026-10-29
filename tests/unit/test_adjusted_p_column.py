@@ -1,6 +1,7 @@
 """A DEG table without adj.P.Val fails loudly; raw P.Value is never used in its place."""
 
 import json
+import re
 
 import pandas as pd
 import pytest
@@ -50,14 +51,14 @@ def _results_with_raw_only(tmp_path):
 @pytest.mark.unit
 def test_identify_important_genes_raises_on_raw_only_file(tmp_path):
     ri, deg_path = _results_with_raw_only(tmp_path)
-    with pytest.raises(MissingAdjustedPValueError, match=str(deg_path)):
+    with pytest.raises(MissingAdjustedPValueError, match=re.escape(str(deg_path))):
         ri.identify_important_genes()
 
 
 @pytest.mark.unit
 def test_heatmap_raises_on_raw_only_file(tmp_path):
     ri, deg_path = _results_with_raw_only(tmp_path)
-    with pytest.raises(MissingAdjustedPValueError, match=str(deg_path)):
+    with pytest.raises(MissingAdjustedPValueError, match=re.escape(str(deg_path))):
         ri.create_lfc_heatmap(genes=["G1", "G2"], contrasts=[("GSE9", "c1")])
 
 
