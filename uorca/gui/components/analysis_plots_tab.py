@@ -201,7 +201,7 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
                 "Generate PDF versions of DEG plots (slower)",
                 value=st.session_state[f"download_components_{selected_dataset}"].get('include_pdfs', False),
                 key=f"checkbox_pdfs_{selected_dataset}",
-                help="Generate high-resolution PDF versions of volcano plots, MA plots, and heatmaps for each contrast. This significantly increases processing time but provides publication-quality vector graphics."
+                help="Generate high-resolution PDF versions of the volcano and MA plots for each contrast, and of the PCA plot and clustering heatmap. This significantly increases processing time but provides publication-quality vector graphics."
             )
             
             # Update session state
