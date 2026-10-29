@@ -125,3 +125,62 @@ def test_repeated_gene_names_stay_separate_rows():
     sel = top_variable_genes(cpm)
     fig = create_clustering_heatmap(sel, None, group_display(["(no group)"]))
     assert len(set(fig.data[1].y)) == 3
+
+
+def test_identity_groups_are_unknown():
+    from uorca.gui.sample_structure import known_groups
+
+    assert known_groups(pd.Series({"S1": "S1", "S2": "S2"})) is None
+    assert known_groups(None) is None
+    g = pd.Series({"S1": "A", "S2": "S2"})
+    assert known_groups(g) is g
+
+
+def test_no_group_and_empty_names_do_not_block_prefix_or_vanish():
+    d = group_display(["(no group)", "Cells_KO", "Cells_WT", ""])
+    assert d.prefix == "Cells_"
+    assert d.labels["(no group)"] == "(no group)" and d.labels["(empty)"] == "(empty)"
+    assert d.labels["Cells_KO"] == "KO"
+    # A prefix that would leave only punctuation is not removed.
+    assert group_display(["A__", "A_b"]).prefix == ""
+
+
+def test_caption_counts_and_missing_genes():
+    cpm = _cpm(n_genes=5)
+    cpm.loc[0, "GSM2"] = np.nan
+    sel = top_variable_genes(cpm, n=4)
+    assert sel.n_missing == 1 and "G00" not in sel.matrix.index
+    assert "all 4 genes" in caption(sel, 6, group_display(["x"]), "PCA of")
+    assert "1 genes with a missing value" in caption(sel, 6, group_display(["x"]), "PCA of")
+    sel3 = top_variable_genes(cpm, n=3)
+    assert "the 3 genes with the highest" in caption(sel3, 6, group_display(["x"]), "PCA of")
+
+
+def test_pca_rejects_one_gene_and_constant_genes():
+    with pytest.raises(ValueError, match="at least 2 samples and 2 genes"):
+        run_pca(pd.DataFrame({"S1": [1.0], "S2": [2.0]}, index=pd.Index(["G"])))
+    with pytest.raises(ValueError, match="constant"):
+        run_pca(pd.DataFrame({"S1": [1.0, 3.0], "S2": [1.0, 3.0]}, index=pd.Index(["G1", "G2"])))
+
+
+def test_package_reports_failed_pdfs(tmp_path, monkeypatch):
+    import zipfile
+
+    from tests._results_fixtures import make_dataset
+    from uorca.gui.components import helpers
+    from uorca.gui.results_integration import ResultsIntegrator
+
+    make_dataset(tmp_path, "GSE1")
+    ri = ResultsIntegrator(str(tmp_path))
+    ri.load_data()
+    monkeypatch.setattr(helpers, "plotly_fig_to_pdf_bytes", lambda *a, **k: None)
+    data = helpers.create_dataset_download_package(
+        ri=ri, results_dir=str(tmp_path), dataset_id="GSE1", dataset_accession="GSE1",
+        components={"qc_plots": True, "include_pdfs": True, "deg_analysis": False,
+                    "metadata": False, "abundance": False, "r_script": False},
+    )
+    assert data is not None
+    with zipfile.ZipFile(__import__("io").BytesIO(data)) as zf:
+        warn = [n for n in zf.namelist() if n.endswith(helpers.PACKAGE_WARNINGS_FILE)]
+        assert warn, zf.namelist()
+        assert "PCA_plot.pdf was not made" in zf.read(warn[0]).decode()

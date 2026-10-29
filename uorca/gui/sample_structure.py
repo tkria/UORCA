@@ -30,13 +30,15 @@ Z_LIMIT = 3.0
 _SEPARATORS = "_ -."
 _SYMBOLS = ("circle", "square", "diamond", "triangle-up", "x", "cross", "star", "hexagon")
 _NO_GROUP = "(no group)"
+_EMPTY_GROUP = "(empty)"
 
 
 @dataclass
 class GeneSelection:
     matrix: pd.DataFrame  # genes x samples, logCPM
     n_requested: int
-    n_available: int
+    n_available: int      # genes with no missing value, from which the top n are chosen
+    n_missing: int = 0    # genes left out because they have a missing value
 
     @property
     def n_used(self) -> int:
@@ -50,13 +52,16 @@ def top_variable_genes(cpm: pd.DataFrame, n: int = DEFAULT_TOP_GENES) -> GeneSel
     """
     mat = cpm.set_index("Gene") if "Gene" in cpm.columns else cpm
     mat = mat.astype(float)
+    complete = np.asarray(mat.notna().to_numpy().all(axis=1))
+    n_missing = int((~complete).sum())
+    mat = mat[complete]
     if mat.shape[1] < 2:
         raise ValueError(f"Need at least 2 samples for sample structure plots, found {mat.shape[1]}")
     var = np.asarray(mat.to_numpy().var(axis=1, ddof=1))
     names = mat.index.astype(str).to_numpy()
     order = np.lexsort((names, -var))
     keep = order[: min(n, len(order))]
-    return GeneSelection(matrix=mat.iloc[keep], n_requested=n, n_available=mat.shape[0])
+    return GeneSelection(matrix=mat.iloc[keep], n_requested=n, n_available=mat.shape[0], n_missing=n_missing)
 
 
 @dataclass
@@ -70,6 +75,10 @@ def run_pca(matrix: pd.DataFrame, n_components: int = 3) -> PCAResult:
     x = matrix.to_numpy(dtype=float).T
     x = x - x.mean(axis=0)
     k = min(n_components, x.shape[0], x.shape[1])
+    if k < 2:
+        raise ValueError(f"PCA needs at least 2 samples and 2 genes; found {x.shape[0]} samples and {x.shape[1]} genes")
+    if not np.any(x):
+        raise ValueError("All selected genes are constant across samples, so there is no variance for PCA")
     pca = PCA(n_components=k, svd_solver="full")
     coords = pca.fit_transform(x)
     cols = [f"PC{i + 1}" for i in range(k)]
@@ -116,10 +125,28 @@ def _shared_prefix(names: Sequence[str]) -> str:
     return prefix
 
 
+def known_groups(groups: Optional[pd.Series]) -> Optional[pd.Series]:
+    """None when the groups are not known.
+
+    load_sample_groups() returns each sample as its own group when the sample
+    table or the group column is missing; that is not a grouping to colour by.
+    """
+    if groups is None or len(groups) == 0:
+        return None
+    if all(str(k) == str(v) for k, v in groups.items()):
+        return None
+    return groups
+
+
 def group_display(groups: Sequence[str], max_label: int = MAX_LEGEND_LABEL) -> GroupDisplay:
-    order = sorted({str(g) for g in groups})
-    prefix = _shared_prefix(order)
-    shown = {g: g[len(prefix):] for g in order}
+    order = sorted({str(g) if str(g) != "" else _EMPTY_GROUP for g in groups})
+    named = [g for g in order if g not in (_NO_GROUP, _EMPTY_GROUP)]
+    prefix = _shared_prefix(named)
+    shown = {g: (g[len(prefix):] if g in named else g) for g in order}
+    if prefix and any(not any(ch.isalnum() for ch in shown[g]) for g in named):
+        # Removing the prefix would leave a name with no letter or digit.
+        prefix = ""
+        shown = {g: g for g in order}
     codes = {g: f"G{i + 1}" for i, g in enumerate(order)}
     uses_codes = any(len(s) > max_label for s in shown.values())
     labels = {}
@@ -143,7 +170,8 @@ def group_styles(n: int) -> List[Dict[str, str]]:
 
 def sample_group_series(samples: Sequence[str], group_labels: Optional[pd.Series]) -> pd.Series:
     labels = group_labels if group_labels is not None else pd.Series(dtype=object)
-    return pd.Series([str(labels.get(s, _NO_GROUP)) for s in samples], index=list(samples))
+    values = [str(labels.get(s, _NO_GROUP)) for s in samples]
+    return pd.Series([v if v != "" else _EMPTY_GROUP for v in values], index=list(samples))
 
 
 def _unique_labels(names: List[str]) -> List[str]:
@@ -286,12 +314,15 @@ def create_clustering_heatmap(
 
 
 def caption(selection: GeneSelection, n_samples: int, display: GroupDisplay, what: str) -> str:
-    genes = (
-        f"the {selection.n_used} genes with the highest logCPM variance"
-        if selection.n_used < selection.n_available
-        else f"all {selection.n_used} genes (fewer than {selection.n_requested} passed filtering)"
-    )
+    if selection.n_available > selection.n_requested:
+        genes = f"the {selection.n_used} genes with the highest logCPM variance"
+    elif selection.n_available == selection.n_requested:
+        genes = f"all {selection.n_used} genes"
+    else:
+        genes = f"all {selection.n_used} genes (fewer than {selection.n_requested} passed filtering)"
     text = f"{what} {n_samples} samples, {genes}."
+    if selection.n_missing:
+        text += f" {selection.n_missing} genes with a missing value were left out."
     if display.prefix:
         text += f" Group names share the prefix “{display.prefix}”; it is not shown."
     return text

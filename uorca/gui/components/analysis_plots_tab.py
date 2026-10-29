@@ -4,8 +4,10 @@ Analysis Plots Tab for UORCA Explorer.
 This tab displays quality control and differential expression plots from individual datasets.
 """
 
+import io
 import os
 import logging
+import zipfile
 import pandas as pd
 import streamlit as st
 import traceback
@@ -22,6 +24,7 @@ from .helpers import (
     is_analysis_successful,
     get_valid_contrasts_from_analysis_info,
     validate_contrast_has_deg_data,
+    PACKAGE_WARNINGS_FILE,
     create_dataset_download_package,
     generate_plot_filename
 )
@@ -31,6 +34,7 @@ from uorca.gui.sample_structure import (
     create_clustering_heatmap,
     create_pca_figure,
     group_display,
+    known_groups,
     run_pca,
     sample_group_series,
     top_variable_genes,
@@ -258,6 +262,8 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
                 # Step 2: Download ready
                 package_data = st.session_state[f"package_ready_{selected_dataset}"]
                 st.success("**Step 2**: Your package is ready! Click the button below to download.")
+                for problem in _package_warnings(package_data['bytes']):
+                    st.warning(f"Part of the package is missing: {problem}")
                 
                 col1, col2, col3 = st.columns([2, 3, 2])
                 with col1:
@@ -309,6 +315,15 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
 
     # Display metadata section
     _render_metadata_section(ri, selected_dataset)
+
+
+def _package_warnings(package_bytes: bytes) -> List[str]:
+    """Lines of the package's PACKAGE_WARNINGS.txt (parts that could not be made)."""
+    with zipfile.ZipFile(io.BytesIO(package_bytes)) as zf:
+        for name in zf.namelist():
+            if name.endswith("/" + PACKAGE_WARNINGS_FILE):
+                return [line for line in zf.read(name).decode().splitlines() if line.strip()]
+    return []
 
 
 @log_streamlit_function
@@ -406,10 +421,7 @@ def _render_sample_structure(ri: ResultsIntegrator, selected_dataset: str, base_
     try:
         selection = top_variable_genes(cpm_df, DEFAULT_TOP_GENES)
         samples = list(selection.matrix.columns)
-        group_labels = None if groups is None else pd.Series(groups)
-        if group_labels is not None and all(str(k) == str(v) for k, v in group_labels.items()):
-            # load_sample_groups() returns each sample as its own group when groups are unknown.
-            group_labels = None
+        group_labels = known_groups(None if groups is None else pd.Series(groups))
         sample_groups = sample_group_series(samples, group_labels)
         display = group_display(sample_groups.tolist())
         titles = load_sample_titles(ri.results_dir, selected_dataset) if SINGLE_PLOTS_AVAILABLE else None

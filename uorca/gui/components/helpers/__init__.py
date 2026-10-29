@@ -46,6 +46,9 @@ from .ai_agent_tool_logger import (
 
 logger = logging.getLogger(__name__)
 
+# Written into a dataset package when a selected part could not be made.
+PACKAGE_WARNINGS_FILE = "PACKAGE_WARNINGS.txt"
+
 
 class ModuleFilter(logging.Filter):
     """Filter for logging modules."""
@@ -607,9 +610,10 @@ def create_dataset_download_package(
                     add_directory_to_zip(zf, abundance_dir, f"{package_name}/abundance")
             
             # 3. Add QC plots (if selected)
+            package_warnings: List[str] = []
             if components.get('qc_plots', True):
                 include_pdfs = components.get('include_pdfs', False)
-                _add_qc_plots_to_zip(zf, ri, dataset_id, dataset_path, package_name, include_pdfs)
+                package_warnings += _add_qc_plots_to_zip(zf, ri, dataset_id, dataset_path, package_name, include_pdfs)
             
             # 4. Add DEG analysis data and plots (if selected)
             if components.get('deg_analysis', True):
@@ -636,6 +640,10 @@ def create_dataset_download_package(
                 except Exception as e:
                     logger.warning(f"Failed to add R script bundle: {e}")
 
+            if package_warnings:
+                # The Analyses tab shows this file's content after the build.
+                zf.writestr(f"{package_name}/{PACKAGE_WARNINGS_FILE}", "\n".join(package_warnings) + "\n")
+
             # 6. Create and add README (always include, but customize content)
             readme_content = _generate_dataset_readme(ri, dataset_id, dataset_accession, components)
             zf.writestr(f"{package_name}/README.txt", readme_content)
@@ -656,8 +664,9 @@ def _add_qc_plots_to_zip(
     dataset_path: str,
     package_name: str,
     include_pdfs: bool = False
-):
-    """Add QC plots to the ZIP package."""
+) -> List[str]:
+    """Add QC plots to the ZIP package. Returns a message for each plot that could not be made."""
+    problems: List[str] = []
     rnaseq_dir = os.path.join(dataset_path, "RNAseqAnalysis")
     
     # Static QC plots (always include PNGs)
@@ -680,13 +689,13 @@ def _add_qc_plots_to_zip(
         try:
             from uorca.gui.single_analysis_plots import load_sample_groups, load_sample_titles
             from uorca.gui.sample_structure import (
-                create_clustering_heatmap, create_pca_figure, group_display, run_pca,
+                create_clustering_heatmap, create_pca_figure, group_display, known_groups, run_pca,
                 sample_group_series, top_variable_genes,
             )
 
             cpm_df = ri.cpm_data[dataset_id]
             analysis_info = ri.analysis_info.get(dataset_id)
-            groups = load_sample_groups(ri.results_dir, dataset_id, cpm_df, analysis_info)
+            groups = known_groups(load_sample_groups(ri.results_dir, dataset_id, cpm_df, analysis_info))
             titles = load_sample_titles(ri.results_dir, dataset_id)
             selection = top_variable_genes(cpm_df)
             display = group_display(sample_group_series(list(selection.matrix.columns), groups).tolist())
@@ -698,8 +707,12 @@ def _add_qc_plots_to_zip(
                 pdf_bytes = plotly_fig_to_pdf_bytes(fig, width=1200, height=height, scale=2)
                 if pdf_bytes:
                     zf.writestr(f"{package_name}/QC_plots/{name}", pdf_bytes)
+                else:
+                    problems.append(f"QC_plots/{name} was not made: PDF export failed (is Kaleido installed?)")
         except Exception as e:
-            logger.warning(f"Could not generate sample structure PDFs for {dataset_id}: {e}")
+            logger.exception(f"Could not generate sample structure PDFs for {dataset_id}")
+            problems.append(f"QC_plots/PCA_plot.pdf and sample_clustering_heatmap.pdf were not made: {type(e).__name__}: {e}")
+    return problems
 
 
 def _add_deg_analysis_to_zip(
