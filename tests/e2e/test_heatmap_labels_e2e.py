@@ -15,6 +15,7 @@ area and the chart's SVG, and asserts:
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -102,6 +103,19 @@ def _wait_idle(page) -> None:
     page.wait_for_timeout(500)
 
 
+def _click_single(page, locator, timeout_s: float = 60) -> None:
+    """Click a locator once it matches exactly one element.
+
+    During a rerun Streamlit can keep the previous copy of a widget (for
+    example a tab bar) next to the new one for a moment, and a click then
+    fails Playwright's strict mode.
+    """
+    end = time.monotonic() + timeout_s
+    while locator.count() != 1 and time.monotonic() < end:
+        page.wait_for_timeout(200)
+    locator.click()
+
+
 def _measure(browser, url: str, width: int) -> dict:
     context = browser.new_context(viewport={"width": width, "height": 1400})
     page = context.new_page()
@@ -112,9 +126,9 @@ def _measure(browser, url: str, width: int) -> dict:
         sidebar = page.locator('[data-testid="stSidebar"]')
         sidebar.get_by_role("button", name="Select All").click()
         _wait_idle(page)
-        page.get_by_role("tab", name="Explore DEG Heatmap").click()
+        _click_single(page, page.get_by_role("tab", name="Explore DEG Heatmap"))
         _wait_idle(page)
-        page.get_by_role("button", name="Generate Heatmap").click()
+        _click_single(page, page.get_by_role("button", name="Generate Heatmap"))
         _wait_idle(page)
         root = page.locator(".st-key-lfc_heatmap_scroll").first
         root.locator(".xtick text").first.wait_for(timeout=120_000)
