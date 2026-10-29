@@ -43,10 +43,15 @@ def find_sample_table(results_dir: str, analysis_id: str) -> Optional[str]:
 
 
 def read_sample_table(path: str) -> pd.DataFrame:
-    """Read the sample table; an unnamed first column is the pandas index."""
+    """Read the sample table; an unnamed first column is the pandas index.
+
+    Only empty cells are missing values. Strings such as "NA" stay text, as in
+    RNAseq.R (read.csv with na.strings = character(0)), so both sides choose the
+    same ID column.
+    """
     first_col = str(pd.read_csv(path, nrows=0).columns[0])
     has_index = first_col == "" or first_col.startswith("Unnamed")
-    return pd.read_csv(path, index_col=0 if has_index else None)
+    return pd.read_csv(path, index_col=0 if has_index else None, keep_default_na=False)
 
 
 def default_column_names(n: int) -> List[str]:

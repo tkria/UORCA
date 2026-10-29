@@ -105,3 +105,36 @@ def test_integrator_renames_old_columns_and_records_mismatch(tmp_path):
     assert "GSE1" in ri.sample_name_errors
     assert "3 sample columns" in ri.sample_name_errors["GSE1"]
     assert list(ri.cpm_data["GSE1"].columns) == ["Gene", "Sample1", "Sample2", "Sample3"]
+
+
+def test_unreadable_sample_table_keeps_cpm_and_records_error(tmp_path):
+    from uorca.gui.results_integration import ResultsIntegrator
+
+    _write_dataset(tmp_path, ["Sample1", "Sample2"], _table(geo_accession=["GSM1", "GSM2"], group=["A", "B"]))
+    (tmp_path / "GSE1" / "metadata" / "edger_analysis_samples.csv").write_text("")
+    (tmp_path / "GSE1" / "metadata" / "analysis_info.json").write_text(
+        '{"accession": "GSE1", "analysis_success": true, "merged_column": "group", "unique_groups": ["A", "B"]}'
+    )
+    ri = ResultsIntegrator(str(tmp_path))
+    ri.load_data()
+    assert "GSE1" in ri.cpm_data
+    assert "GSE1" in ri.sample_name_errors
+
+
+def test_literal_na_string_is_an_id_as_in_r(tmp_path):
+    from uorca.gui.sample_names import read_sample_table
+
+    path = tmp_path / "t.csv"
+    _table(geo_accession=["GSM1", "NA"], SRR=["SRR1", "SRR2"]).to_csv(path)
+    assert sample_ids(read_sample_table(str(path))) == ["GSM1", "NA"]
+
+
+def test_pca_plot_renders_with_groups_and_titles():
+    from uorca.gui.single_analysis_plots import create_pca_plot
+
+    cpm = pd.DataFrame({"Gene": [f"G{i}" for i in range(5)],
+                        "GSM1": [1.0, 2, 3, 4, 5], "GSM2": [2.0, 1, 4, 3, 6], "GSM3": [5.0, 4, 3, 2, 1]})
+    groups = pd.Series({"GSM1": "A", "GSM2": "A"})  # GSM3 has no known group
+    fig = create_pca_plot(cpm, groups, sample_titles=pd.Series({"GSM1": "t1", "GSM2": "t2", "GSM3": "t3"}))
+    names = {t.name: list(t.hovertext) for t in fig.data}
+    assert names == {"A": ["GSM1", "GSM2"], "GSM3": ["GSM3"]}

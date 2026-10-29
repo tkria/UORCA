@@ -631,8 +631,10 @@ class ResultsIntegrator:
                 if sample_table:
                     try:
                         df = name_cpm_columns(df, read_sample_table(sample_table))
-                    except SampleTableMismatch as e:
-                        self.sample_name_errors[analysis_id] = str(e)
+                    except (SampleTableMismatch, ValueError, OSError) as e:
+                        # ValueError covers an empty or unparseable table. The CPM
+                        # still loads with its file names; the tabs show this error.
+                        self.sample_name_errors[analysis_id] = f"{type(e).__name__}: {e}"
                         logger.error(f"{analysis_id}: {e}")
 
                 # Store in dictionary

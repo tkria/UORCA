@@ -399,7 +399,8 @@ def create_pca_plot(cpm: pd.DataFrame, group_labels: Optional[pd.Series] = None,
         pc_df["title"] = pc_df.index.map(sample_titles).fillna("")
         hover_data = {"title": True}
     if group_labels is not None:
-        pc_df["group"] = pc_df.index.map(group_labels).fillna(pc_df.index)
+        # A sample with no known group is its own group.
+        pc_df["group"] = [str(group_labels.get(s, s)) for s in pc_df.index]
         fig = px.scatter(pc_df, x="PC1", y="PC2", color="group", hover_name=pc_df.index, hover_data=hover_data)
     else:
         fig = px.scatter(pc_df, x="PC1", y="PC2", hover_name=pc_df.index, hover_data=hover_data)

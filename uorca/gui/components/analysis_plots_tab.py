@@ -275,7 +275,7 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
     if sample_name_error:
         st.error(
             f"Sample names for {selected_dataset} could not be matched to the sample table, "
-            f"so plots show the generic names from CPM.csv and the groups may be missing. {sample_name_error}"
+            f"so plots show the column names from CPM.csv and the groups may be missing. {sample_name_error}"
         )
 
     # Load sample groups for the selected dataset
@@ -377,7 +377,9 @@ def _render_quality_overview_tab(ri: ResultsIntegrator, selected_dataset: str, q
             cpm_df = ri.cpm_data[selected_dataset]
             titles = load_sample_titles(ri.results_dir, selected_dataset)
             pca_fig = create_pca_plot(cpm_df, groups, sample_titles=titles)
-        except Exception:
+        except Exception as e:
+            logger.exception(f"Interactive PCA failed for {selected_dataset}")
+            st.error(f"Could not draw the interactive PCA plot: {type(e).__name__}: {e}")
             pca_fig = None
 
     if pca_fig is not None:
