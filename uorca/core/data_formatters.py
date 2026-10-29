@@ -3,6 +3,8 @@ import re
 import pandas as pd
 from typing import List, Dict, Any
 
+from uorca.core.pvalues import get_adjusted_p_column
+
 
 def sort_by_geo_accession(df: pd.DataFrame, accession_col: str = "Accession") -> pd.DataFrame:
     """
@@ -167,7 +169,7 @@ def create_contrast_info_table(
     Args:
         analysis_info: Analysis metadata
         deg_data: DEG data
-        pvalue_thresh: P-value threshold for significance
+        pvalue_thresh: Adjusted p-value (BH) threshold for significance
         lfc_thresh: Log fold-change threshold
 
     Returns:
@@ -183,10 +185,13 @@ def create_contrast_info_table(
         accession = info.get("accession", analysis_id)
 
         for contrast_id, deg_df in contrasts_dict.items():
+            # Adjusted p-value (BH) only; raises if the table lacks adj.P.Val
+            p_col = get_adjusted_p_column(deg_df, f"DEG table for {accession}/{contrast_id}")
+
             # Count significant DEGs
-            if 'adj.P.Val' in deg_df.columns and 'logFC' in deg_df.columns:
+            if 'logFC' in deg_df.columns:
                 sig_df = deg_df[
-                    (deg_df['adj.P.Val'] < pvalue_thresh) &
+                    (deg_df[p_col] < pvalue_thresh) &
                     (abs(deg_df['logFC']) > lfc_thresh)
                 ]
                 n_sig = len(sig_df)

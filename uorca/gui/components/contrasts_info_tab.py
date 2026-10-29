@@ -17,7 +17,7 @@ from .helpers import (
     log_streamlit_event,
     get_valid_contrasts_with_data
 )
-from uorca.gui.results_integration import ResultsIntegrator
+from uorca.gui.results_integration import ResultsIntegrator, ADJUSTED_P_LABEL, get_adjusted_p_column
 
 # Set up fragment decorator
 setup_fragment_decorator()
@@ -30,7 +30,7 @@ def render_contrasts_info_tab(ri: ResultsIntegrator, pvalue_thresh: float, lfc_t
 
     Args:
         ri: ResultsIntegrator instance
-        pvalue_thresh: P-value threshold for DEG counting
+        pvalue_thresh: Adjusted p-value (BH) threshold for DEG counting
         lfc_thresh: Log fold change threshold for DEG counting
     """
     st.header("View Contrast Info")
@@ -115,16 +115,12 @@ def _create_contrast_info_dataframe(ri: ResultsIntegrator, pvalue_thresh: float,
         deg_count = 0
         deg_df = ri.deg_data[analysis_id][original_contrast_name]
 
-        # Use exact column names from DEG.csv file - prefer adjusted p-value
-        p_value_col = None
-        if 'adj.P.Val' in deg_df.columns:
-            p_value_col = 'adj.P.Val'  # Adjusted p-value (preferred)
-        elif 'P.Value' in deg_df.columns:
-            p_value_col = 'P.Value'  # Unadjusted p-value (fallback)
+        # Adjusted p-value (BH) only; raises naming the file if adj.P.Val is missing
+        p_value_col = get_adjusted_p_column(deg_df, ri.deg_source(analysis_id, original_contrast_name))
 
         lfc_col = 'logFC' if 'logFC' in deg_df.columns else None
 
-        if p_value_col and lfc_col:
+        if lfc_col:
             deg_count = ((deg_df[p_value_col] < pvalue_thresh) &
                        (abs(deg_df[lfc_col]) > lfc_thresh)).sum()
 
@@ -182,7 +178,7 @@ def _render_filtering_controls(df: pd.DataFrame) -> pd.DataFrame:
 def _render_contrast_table(filtered_df: pd.DataFrame, pvalue_thresh: float, lfc_thresh: float):
     """Render the contrast table for viewing."""
     # Add parameter info for DEGs column
-    deg_help_text = f"P-value < {pvalue_thresh}, |logFC| > {lfc_thresh}"
+    deg_help_text = f"{ADJUSTED_P_LABEL} < {pvalue_thresh} and |log2FC| > {lfc_thresh}"
 
     # Display contrast information
     st.dataframe(

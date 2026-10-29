@@ -8,9 +8,24 @@ on the user's machine. `.gitignore` excludes `data/*`, except this file.
 | File or directory | Source | Version | How to get it | Used by |
 |---|---|---|---|---|
 | `data/kallisto_indices/<species>/index.idx`, `t2g.txt` | [pachterlab/kallisto-transcriptome-indices](https://github.com/pachterlab/kallisto-transcriptome-indices) | Release `v1`, `standard` index type (default) | `./download_kallisto_indices.sh [species] [type]` | kallisto quantification (`uorca/graph/nodes/kallisto.py`), R script bundles |
-| `data/mammalian_orthologues.csv` | Not recorded. The owner must confirm the source and the Ensembl/NCBI release. | Not recorded | Not distributed with the repository | `uorca/gui/ortholog_mapper.py` |
+| `data/mammalian_orthologues.csv` | [AllenInstitute/GeneOrthology](https://github.com/AllenInstitute/GeneOrthology), file `csv/mammalian_orthologs_20231113.csv` | Commit `dd9e22dd03ef60cf418d1fff04690ab8fbd99f2c`; snapshot of the NCBI Gene orthologs table (`gene_orthologs.gz`) of 2023-11-13 | `./download_orthologues.sh` (macOS/Linux) or `powershell -ExecutionPolicy Bypass -File download_orthologues.ps1` (Windows). Both check the SHA-256 below and stop on a mismatch. | `uorca/gui/ortholog_mapper.py` (explorer "Check for orthologues") |
 
 Supported species for the kallisto indices: human, mouse, dog, monkey, zebrafish.
+
+### Orthologue table
+
+- **Source:** <https://github.com/AllenInstitute/GeneOrthology>, file
+  `csv/mammalian_orthologs_20231113.csv` at commit `dd9e22dd03ef60cf418d1fff04690ab8fbd99f2c`.
+- **Download URL:**
+  `https://raw.githubusercontent.com/AllenInstitute/GeneOrthology/dd9e22dd03ef60cf418d1fff04690ab8fbd99f2c/csv/mammalian_orthologs_20231113.csv`
+- **Snapshot date:** 2023-11-13 (NCBI Gene orthologs table, anchored to human genes; 27 mammals plus
+  zebrafish). Upstream does not plan updates, so the snapshot is stable.
+- **SHA-256:** `9989602d1815885c462f029d362bcf518af3390ba167f2a8b1ceb707a67281cf` (17,577,293 bytes).
+- **Licence:** BSD-2-Clause, Copyright (c) 2018 Allen Institute
+  (<https://github.com/AllenInstitute/GeneOrthology/blob/dd9e22dd03ef60cf418d1fff04690ab8fbd99f2c/LICENSE>).
+  Keep the copyright notice and licence text if you redistribute the file.
+- **Saved as:** `data/mammalian_orthologues.csv`. The explorer shows an error and disables the
+  orthologue option when the file is missing.
 
 The kallisto index release `v1` does not state the Ensembl release in this repository. Record the
 Ensembl release from the upstream release notes when you cite results.

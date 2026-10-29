@@ -4,6 +4,12 @@ Ortholog Mapper Module for UORCA Explorer using a local CSV.
 This module maps genes between species using a precomputed mammalian
 orthologues CSV located at data/mammalian_orthologues.csv.
 It replaces network-based lookups with fast, cached local lookups.
+
+The CSV is not in the repository. Fetch it with ``./download_orthologues.sh``
+(macOS/Linux) or ``download_orthologues.ps1`` (Windows); see data/README.md
+for its source (Allen Institute GeneOrthology) and licence. When the file is
+missing, the loader raises FileNotFoundError rather than returning an empty
+table, so the UI cannot report "no orthologues found" by mistake.
 """
 
 import logging
@@ -19,6 +25,11 @@ logger = logging.getLogger(__name__)
 # Path to the orthologues CSV (in project data directory)
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 ORTHOLOG_CSV_PATH = str(_PROJECT_ROOT / "data" / "mammalian_orthologues.csv")
+ORTHOLOG_DOWNLOAD_COMMAND = (
+    "./download_orthologues.sh (macOS/Linux) or "
+    "powershell -ExecutionPolicy Bypass -File download_orthologues.ps1 (Windows), "
+    "run from the UORCA repository root"
+)
 
 # Map scientific/common names (as found in analysis_info.json) to CSV species base names
 # CSV species base names correspond to the prefixes before "_Symbol" in the CSV header
@@ -74,16 +85,54 @@ def _csv_symbol_columns(df: pd.DataFrame) -> Dict[str, str]:
     return {c.replace("_Symbol", ""): c for c in symbol_cols}
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+def _missing_file_message(path: str) -> str:
+    return (
+        f"Orthologue file not found: {path}. "
+        f"Download it with {ORTHOLOG_DOWNLOAD_COMMAND}."
+    )
+
+
+def ortholog_file_error() -> Optional[str]:
+    """Return an error message if the orthologue CSV is missing, else None.
+
+    The tabs call this to show ``st.error`` and disable the orthologue checkbox.
+    """
+    if os.path.isfile(ORTHOLOG_CSV_PATH):
+        return None
+    return _missing_file_message(ORTHOLOG_CSV_PATH)
+
+
 def _load_ortholog_df() -> Tuple[pd.DataFrame, Dict[str, str]]:
-    """Load the orthologue CSV and return DataFrame and species->symbol column map."""
-    try:
-        df = pd.read_csv(ORTHOLOG_CSV_PATH)
-    except Exception as e:
-        logger.error(f"Failed to load orthologue CSV at {ORTHOLOG_CSV_PATH}: {e}")
-        return pd.DataFrame(), {}
+    """Load the orthologue CSV and return DataFrame and species->symbol column map.
+
+    Raises:
+        FileNotFoundError: if the CSV is missing; the message names the download command.
+        ValueError: if the CSV has no ``*_Symbol`` columns.
+
+    Only successful loads are cached (``st.cache_data`` does not cache an
+    exception), so downloading the file takes effect on the next call.
+    """
+    return _load_ortholog_csv(ORTHOLOG_CSV_PATH)
+
+
+def clear_ortholog_cache() -> None:
+    """Drop the cached orthologue table (for tests, or after re-downloading)."""
+    _load_ortholog_csv.clear()  # type: ignore[attr-defined]  # added by st.cache_data
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_ortholog_csv(path: str) -> Tuple[pd.DataFrame, Dict[str, str]]:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(_missing_file_message(path))
+    df = pd.read_csv(path)
     species_to_symbol = _csv_symbol_columns(df)
+    if not species_to_symbol:
+        raise ValueError(
+            f"Orthologue file {path} has no '*_Symbol' columns. Re-download it with "
+            f"{ORTHOLOG_DOWNLOAD_COMMAND}."
+        )
     return df, species_to_symbol
+
 
 
 def _organism_to_csv_species(organism: str) -> Optional[str]:
@@ -174,9 +223,6 @@ def expand_genes_with_orthologs(
         return input_genes, {} if return_mapping else None
 
     df, species_to_symbol = _load_ortholog_df()
-    if df.empty:
-        logger.warning("Orthologue CSV is empty or failed to load.")
-        return input_genes, {} if return_mapping else None
 
     # Map organisms to CSV species base names and symbol columns
     csv_targets = []
@@ -241,9 +287,6 @@ def expand_genes_all_vs_all(
         return input_genes, None
 
     df, species_to_symbol = _load_ortholog_df()
-    if df.empty:
-        logger.warning("Orthologue CSV is empty or failed to load.")
-        return input_genes, None
 
     # Determine which symbol columns correspond to selected organisms
     org_infos = []

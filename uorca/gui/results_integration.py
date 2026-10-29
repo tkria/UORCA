@@ -37,7 +37,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import scipy.cluster.hierarchy as sch
 from scipy.spatial.distance import pdist
-from typing import List, Dict, Tuple, Optional, Union, Set
+from typing import List, Dict, Tuple, Optional, Union, Set, Sequence
 import logging
 import re
 from pathlib import Path
@@ -45,9 +45,247 @@ from datetime import datetime
 import json
 import math
 
+import textwrap
+from dataclasses import dataclass
+import html
+
+# p-value columns and labels live in uorca.core.pvalues; re-exported for the GUI.
+from uorca.gui.sample_names import (
+    SAMPLE_TABLE_NAME,
+    SampleTableMismatch,
+    find_sample_table,
+    name_cpm_columns,
+    read_sample_table,
+    sample_groups,
+    sample_titles,
+)
+from uorca.core.pvalues import (
+    ADJUSTED_P_COLUMN,
+    ADJUSTED_P_HELP,
+    ADJUSTED_P_LABEL,
+    RAW_P_COLUMN,
+    RAW_P_LABEL,
+    MissingAdjustedPValueError,
+    get_adjusted_p_column,
+)
+
 # Set up logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
+
+
+# ---------------------------------------------------------------------------
+# Heatmap contrast labels
+# ---------------------------------------------------------------------------
+
+SHORT_LABEL_CHARS = 25   # one-line, angled heatmap tick labels
+HEATMAP_TICK_ANGLE = -45
+ELLIPSIS = "…"
+HOVER_WRAP_CHARS = 80
+HEATMAP_MIN_COL_PX = 28  # measured in the live app: 25-character labels at -45 deg do not overlap
+FORMULA_MAX_CHARS = 300
+GROUP_LINE_CHARS = 24
+GROUP_MAX_LINES = 3
+
+
+@dataclass(frozen=True)
+class ContrastLabel:
+    """One heatmap column.
+
+    ``accession`` is the dataset, ``full`` the full contrast name (plain text,
+    for hover and the key table) and ``display`` the short, unique,
+    HTML-escaped tick label.
+    """
+    accession: str
+    full: str
+    display: str
+
+
+def _split_label_tokens(text: str) -> List[str]:
+    """Split after each '_' or ' ' so that joining the tokens restores the text."""
+    return [t for t in re.split(r"(?<=[_ ])", text) if t]
+
+
+def wrap_contrast_label(text: str,
+                        line_chars: int = GROUP_LINE_CHARS,
+                        max_lines: int = GROUP_MAX_LINES) -> str:
+    """Wrap a contrast name onto at most ``max_lines`` lines joined by ``<br>``.
+
+    Lines break after '_' or ' '. A token longer than a line is split. No
+    character is dropped unless the text needs more than ``max_lines`` lines;
+    then the last line ends in an ellipsis. Each line is HTML-escaped after
+    wrapping, so a name containing '<' or '&' cannot inject Plotly markup.
+    """
+    lines: List[str] = []
+    current = ""
+    for token in _split_label_tokens(text):
+        while len(token) > line_chars:
+            if current:
+                lines.append(current)
+                current = ""
+            lines.append(token[:line_chars])
+            token = token[line_chars:]
+        if len(current) + len(token) > line_chars:
+            lines.append(current)
+            current = token
+        else:
+            current += token
+    if current:
+        lines.append(current)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        lines[-1] = last[: line_chars - len(ELLIPSIS)] + ELLIPSIS
+    return "<br>".join(html.escape(line, quote=False) for line in lines)
+
+
+def _shared_leading_words(names: Sequence[str]) -> str:
+    """Leading '_'-separated words that every name shares, e.g. "PPARG_" for
+    "PPARG_KD1_vs_control" and "PPARG_rescue_vs_dox". Empty when fewer than two
+    distinct names, or when dropping the words would leave a name empty."""
+    distinct = list(dict.fromkeys(names))
+    if len(distinct) < 2:
+        return ""
+    token_lists = [_split_label_tokens(n) for n in distinct]
+    shared: List[str] = []
+    for tokens in zip(*token_lists):
+        if all(t == tokens[0] for t in tokens) and tokens[0].endswith(("_", " ")):
+            shared.append(tokens[0])
+        else:
+            break
+    prefix = "".join(shared)
+    if any(len(n) <= len(prefix) for n in distinct):
+        return ""
+    return prefix
+
+
+def shorten_label(text: str, max_chars: int = SHORT_LABEL_CHARS) -> str:
+    """Cut ``text`` to one line of at most ``max_chars`` characters, ending in "…" if cut."""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - len(ELLIPSIS)].rstrip("_ ") + ELLIPSIS
+
+
+def build_contrast_labels(contrasts: Sequence[Tuple[Optional[str], str]],
+                          max_chars: int = SHORT_LABEL_CHARS) -> List[ContrastLabel]:
+    """Short, unique, one-line tick labels for heatmap columns.
+
+    Args:
+        contrasts: ``(accession, contrast_name)`` pairs in column order.
+
+    The accession is not part of the label: the heatmap shows it once above
+    each dataset's block of columns. Within a dataset, the leading words that
+    all of its contrast names share are dropped, then the rest is cut to
+    ``max_chars`` with an ellipsis. A label already used in the plot gets the
+    lowest free " (n)" suffix. ``display`` is HTML-escaped; ``full`` keeps the
+    whole name for the hover and the key table.
+    """
+    by_acc: Dict[str, List[str]] = {}
+    for acc, name in contrasts:
+        by_acc.setdefault(str(acc or ""), []).append(name)
+    prefixes = {acc: _shared_leading_words(names) for acc, names in by_acc.items()}
+
+    labels: List[ContrastLabel] = []
+    used: Set[str] = set()
+    for acc, name in contrasts:
+        acc_key = str(acc or "")
+        prefix = prefixes[acc_key]
+        short = shorten_label(name[len(prefix):] if prefix else name, max_chars)
+        candidate = short
+        n = 2
+        while candidate in used:
+            suffix = f" ({n})"
+            candidate = shorten_label(short, max_chars - len(suffix)) + suffix
+            n += 1
+        used.add(candidate)
+        labels.append(ContrastLabel(accession=acc_key, full=name,
+                                    display=html.escape(candidate, quote=False)))
+    return labels
+
+
+def _common_label_prefix(names: Sequence[str]) -> str:
+    """Longest prefix shared by all names, cut back to the last '_' or ' '."""
+    if len(names) < 2:
+        return ""
+    prefix = os.path.commonprefix(list(names))
+    cut = max(prefix.rfind("_"), prefix.rfind(" "))
+    prefix = prefix[: cut + 1] if cut >= 0 else ""
+    # Keep at least some text of every name after the prefix
+    if any(len(n) <= len(prefix) for n in names):
+        return ""
+    return prefix
+
+
+def build_group_labels(groups: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, str], str]:
+    """Readable, unique x-axis labels for sample groups.
+
+    Args:
+        groups: ``(accession, group_name)`` pairs. Each pair is one sample group.
+
+    Group names are often long free text that differ only after a shared
+    prefix (for example 22 GSE295568 groups all starting
+    "Placenta_CT27_Human trophoblast stem cells_"). Per dataset, the shared
+    prefix is dropped (shown as a leading ellipsis), the rest is wrapped onto
+    ``GROUP_MAX_LINES`` lines and HTML-escaped. Every distinct pair gets a
+    distinct label, so a cut label can never merge two groups into one box.
+    The full group name stays available for hover text.
+    """
+    pairs = list(dict.fromkeys((str(a), str(g)) for a, g in groups))
+    by_acc: Dict[str, List[str]] = {}
+    for acc, grp in pairs:
+        by_acc.setdefault(acc, []).append(grp)
+    prefixes = {acc: _common_label_prefix(names) for acc, names in by_acc.items()}
+
+    labels: Dict[Tuple[str, str], str] = {}
+    used: Set[str] = set()
+    for acc, grp in pairs:
+        prefix = prefixes[acc]
+        rest = grp[len(prefix):] if prefix else grp
+        display = wrap_contrast_label(rest, line_chars=GROUP_LINE_CHARS, max_lines=GROUP_MAX_LINES)
+        if prefix:
+            display = ELLIPSIS + display
+        candidate = display
+        n = 2
+        while candidate in used:
+            candidate = f"{display} ({n})"
+            n += 1
+        used.add(candidate)
+        labels[(acc, grp)] = candidate
+    return labels
+
+
+def _accession_sort_key(accession: str) -> Tuple[str, int, str]:
+    """GSE2 before GSE10: sort by prefix, then number, then the full text."""
+    m = re.match(r"([A-Za-z]*)(\d+)", accession)
+    return (m.group(1), int(m.group(2)), accession) if m else (accession, -1, accession)
+
+
+def _accession_blocks(column_accessions: Sequence[str]) -> List[Tuple[str, int, int]]:
+    """Runs of equal accessions as (accession, first index, last index)."""
+    blocks: List[Tuple[str, int, int]] = []
+    for i, acc in enumerate(column_accessions):
+        if blocks and blocks[-1][0] == acc and blocks[-1][2] == i - 1:
+            blocks[-1] = (acc, blocks[-1][1], i)
+        else:
+            blocks.append((acc, i, i))
+    return blocks
+
+
+def wrap_hover_text(text: str, width: int = HOVER_WRAP_CHARS,
+                    max_chars: Optional[int] = None) -> str:
+    """Wrap text for a Plotly hover box, optionally cutting it with an ellipsis.
+
+    Lines are HTML-escaped after wrapping, so the text cannot inject markup.
+    """
+    text = "" if text is None else str(text)
+    if max_chars is not None and len(text) > max_chars:
+        text = text[:max_chars].rstrip() + ELLIPSIS
+    if not text:
+        return ""
+    lines = textwrap.wrap(text, width=width, break_long_words=True,
+                          break_on_hyphens=False) or [text]
+    return "<br>".join(html.escape(line, quote=False) for line in lines)
 
 
 class ResultsIntegrator:
@@ -71,7 +309,7 @@ class ResultsIntegrator:
         output_dir : str, optional
             Directory where integrated results will be saved
         pvalue_threshold : float
-            P-value threshold for considering genes as differentially expressed
+            Adjusted p-value (BH) threshold for considering genes as differentially expressed
         lfc_threshold : float
             Log fold change threshold for considering genes as differentially expressed
         top_n_genes : int
@@ -94,7 +332,13 @@ class ResultsIntegrator:
         self.analysis_info = {}   # Analysis metadata
         self.deg_data = {}        # DEG data for each contrast
         self.cpm_data = {}        # CPM data for each analysis
-        self.contrast_info = {}   # Information about contrasts
+        self.contrast_info = {}   # Information about contrasts, keyed by name
+        # Contrast information keyed by (analysis_id, contrast_name). Two
+        # datasets can use the same contrast name with different meanings.
+        self.contrast_info_by_analysis: Dict[Tuple[str, str], Dict] = {}
+        self.deg_file_paths: Dict[str, Dict[str, str]] = {}  # analysis_id -> contrast_id -> DEG.csv
+        # analysis_id -> why its CPM columns could not be named by sample ID
+        self.sample_name_errors: Dict[str, str] = {}
 
         logger.info(f"Initialized ResultsIntegrator with results_dir: {self.results_dir}")
 
@@ -280,6 +524,7 @@ class ResultsIntegrator:
 
         # Load contrast information if available
         self.contrast_info = {}
+        self.contrast_info_by_analysis = {}
 
         # Try to load contrasts from each analysis directory as well as global locations
         analysis_folders = self.find_analysis_folders()
@@ -298,11 +543,13 @@ class ResultsIntegrator:
                             if 'name' in row and 'description' in row:
                                 contrast_key = row['name']
                                 # Store the extracted sections
-                                self.contrast_info[contrast_key] = {
+                                entry = {
                                     'name': row['name'],  # Store the original name
                                     'description': row['description'],
                                     'expression': row.get('expression', '')
                                 }
+                                self.contrast_info[contrast_key] = entry
+                                self.contrast_info_by_analysis[(analysis_id, str(contrast_key))] = entry
                         logger.info(f"Loaded contrasts from {contrasts_file}")
                     except Exception as e:
                         logger.warning(f"Error loading contrasts file {contrasts_file}: {str(e)}")
@@ -334,6 +581,7 @@ class ResultsIntegrator:
         self._create_consistent_contrast_names()
 
         # Load DEG data
+        self.deg_file_paths = deg_files
         for analysis_id, contrasts in deg_files.items():
             self.deg_data[analysis_id] = {}
 
@@ -364,6 +612,7 @@ class ResultsIntegrator:
                     logger.error(f"Error loading DEG file {deg_file}: {str(e)}")
 
         # Load CPM data
+        self.sample_name_errors = {}
         for analysis_id, cpm_file in cpm_files.items():
             try:
                 df = pd.read_csv(cpm_file)
@@ -382,6 +631,17 @@ class ResultsIntegrator:
 
                 # Standardize column name to 'Gene'
                 df = df.rename(columns={gene_col: 'Gene'})
+
+                # Name the sample columns by GSM accession (old runs wrote Sample1..N)
+                sample_table = find_sample_table(self.results_dir, analysis_id)
+                if sample_table:
+                    try:
+                        df = name_cpm_columns(df, read_sample_table(sample_table))
+                    except (SampleTableMismatch, ValueError, OSError) as e:
+                        # ValueError covers an empty or unparseable table. The CPM
+                        # still loads with its file names; the tabs show this error.
+                        self.sample_name_errors[analysis_id] = f"{type(e).__name__}: {e}"
+                        logger.error(f"{analysis_id}: {e}")
 
                 # Store in dictionary
                 self.cpm_data[analysis_id] = df
@@ -412,7 +672,7 @@ class ResultsIntegrator:
         top_frequent : int
             Number of top frequently occurring genes to select
         p_value_threshold : float, optional
-            P-value threshold for significance (uses instance default if None)
+            Adjusted p-value (BH) threshold for significance (uses instance default if None)
         lfc_threshold : float, optional
             Log fold change threshold for significance (uses instance default if None)
 
@@ -445,24 +705,17 @@ class ResultsIntegrator:
                     logger.warning(f"No 'Gene' column in {contrast_key}")
                     continue
 
-                # Use exact column names from the DEG.csv file
-                # Find adjusted p-value column first, fall back to unadjusted if necessary
-                p_value_col = None
-                if 'adj.P.Val' in df.columns:
-                    p_value_col = 'adj.P.Val'  # Preferred: use adjusted p-value for multiple testing correction
-                    logger.info(f"Using adjusted p-value column 'adj.P.Val' for {contrast_key}")
-                elif 'P.Value' in df.columns:
-                    p_value_col = 'P.Value'  # Fall back to unadjusted p-value if adjusted not available
-                    logger.info(f"Using unadjusted p-value column 'P.Value' for {contrast_key}")
+                # Adjusted p-value (BH) only; raises if the file lacks adj.P.Val
+                p_value_col = get_adjusted_p_column(df, self.deg_source(analysis_id, contrast_id))
 
                 # Use exact column name from the DEG.csv file
                 lfc_col = 'logFC' if 'logFC' in df.columns else None
 
-                if p_value_col is None or lfc_col is None:
+                if lfc_col is None:
                     logger.warning(f"Missing required columns in {contrast_key}. Available columns: {df.columns.tolist()}")
                     continue
 
-                logger.info(f"Using columns for {contrast_key}: p-value={p_value_col}, logFC={lfc_col}")
+                logger.info(f"Using columns for {contrast_key}: adjusted p-value={p_value_col}, logFC={lfc_col}")
 
                 # Filter significant genes
                 sig_df = df[(df[p_value_col] < p_thresh) &
@@ -528,7 +781,7 @@ class ResultsIntegrator:
         output_file : str, optional
             Path to save the interactive HTML output. If None, no file is saved (useful for Streamlit).
         p_value_threshold : float, optional
-            P-value threshold for significance filtering. If None, uses instance default.
+            Adjusted p-value (BH) threshold for significance filtering. If None, uses instance default.
         lfc_threshold : float, optional
             Log fold change threshold for significance filtering. If None, uses instance default.
         hide_empty_rows_cols : bool, optional
@@ -574,23 +827,28 @@ class ResultsIntegrator:
                     contrasts.append((analysis_id, contrast_id))
             logger.info(f"No contrasts specified, using all {len(contrasts)} contrasts")
 
-        # Create simplified contrast labels for display
-        def simplify_contrast_label(analysis_id: str, contrast_id: str) -> str:
-            """Create simplified label for display"""
-            # Try to get original name from contrast_info if available
-            if hasattr(self, "contrast_info") and contrast_id in self.contrast_info:
-                original_name = self.contrast_info[contrast_id].get('name', contrast_id)
-            else:
-                original_name = contrast_id
+        def simplify_contrast_labels(pairs: List[Tuple[str, str]]) -> List[ContrastLabel]:
+            """Full name (hover) and wrapped, unique display label (axis) per contrast."""
+            named = []
+            for analysis_id, contrast_id in pairs:
+                entry = self.get_contrast_entry(analysis_id, contrast_id) or {}
+                name = entry.get('name') or contrast_id
+                accession = self.analysis_info.get(analysis_id, {}).get('accession', analysis_id)
+                named.append((accession, name))
+            return build_contrast_labels(named)
 
-            # Remove dataset prefix and keep it short
-            simplified = original_name.split(":", 1)[-1].split(" –")[0].split(" - ")[0][:25]
-            return simplified
-
-        # Create both full and simplified contrast labels
+        # Internal column keys, plus full and display labels in the same order
         contrast_labels = [f"{a_id}_{c_id}" for a_id, c_id in contrasts]
-        simplified_labels = [simplify_contrast_label(a_id, c_id) for a_id, c_id in contrasts]
+        label_objs = simplify_contrast_labels(contrasts)
+        simplified_labels = [lab.display for lab in label_objs]
+        full_labels = [lab.full for lab in label_objs]
         logger.info(f"Using {len(contrast_labels)} contrast labels: {', '.join(simplified_labels[:5])}{' ...' if len(simplified_labels) > 5 else ''}")
+
+        # What the hover says for each (gene, column): cells set to 0 are either
+        # not significant or absent from the contrast's DEG table, and "0.00"
+        # would misreport both.
+        NOT_IN_RESULTS = "not in this contrast's results"
+        cell_hover: Dict[Tuple[str, str], str] = {}
 
         # Extract log fold change values for each gene across contrasts
         for gene in genes:
@@ -603,6 +861,7 @@ class ResultsIntegrator:
                     if 'Gene' not in df.columns:
                         logger.warning(f"No 'Gene' column found in {analysis_id}/{contrast_id}")
                         row[contrast_label] = 0  # Skip this contrast
+                        cell_hover[(gene, contrast_label)] = NOT_IN_RESULTS
                         continue
 
                     # Find log fold change column
@@ -615,40 +874,35 @@ class ResultsIntegrator:
                     if lfc_col is None:
                         logger.warning(f"No log fold change column found in {analysis_id}/{contrast_id}")
                         row[contrast_label] = 0  # Skip this contrast
+                        cell_hover[(gene, contrast_label)] = NOT_IN_RESULTS
                         continue
 
-                    # Use exact column names from the DEG.csv file
-                    # Find adjusted p-value column first, fall back to unadjusted if necessary
-                    p_value_col = None
-                    if 'adj.P.Val' in df.columns:
-                        p_value_col = 'adj.P.Val'  # Preferred: use adjusted p-value for multiple testing correction
-                        logger.debug(f"Using adjusted p-value column 'adj.P.Val' for {analysis_id}/{contrast_id}")
-                    elif 'P.Value' in df.columns:
-                        p_value_col = 'P.Value'  # Fall back to unadjusted p-value if adjusted not available
-                        logger.debug(f"Using unadjusted p-value column 'P.Value' for {analysis_id}/{contrast_id}")
-
-                    if p_value_col is None:
-                        logger.warning(f"No p-value column found in {analysis_id}/{contrast_id}")
-                        # Continue anyway, we'll use the log fold change without significance filtering
+                    # Adjusted p-value (BH) only; raises if the file lacks adj.P.Val
+                    p_value_col = get_adjusted_p_column(df, self.deg_source(analysis_id, contrast_id))
 
                     # Find the gene and get its logFC, but set to 0 if not significant
                     gene_row = df[df['Gene'] == gene]
                     if not gene_row.empty:
-                        if p_value_col is not None:
-                            p_value = gene_row.iloc[0][p_value_col]
-                            abs_lfc = abs(gene_row.iloc[0][lfc_col])
-                            if p_value >= p_thresh or abs_lfc <= lfc_thresh:
-                                row[contrast_label] = 0  # Not significant, set to white
-                            else:
-                                row[contrast_label] = gene_row.iloc[0][lfc_col]
+                        p_value = gene_row.iloc[0][p_value_col]
+                        lfc_value = gene_row.iloc[0][lfc_col]
+                        abs_lfc = abs(lfc_value)
+                        if p_value >= p_thresh or abs_lfc <= lfc_thresh:
+                            row[contrast_label] = 0  # Not significant, set to white
+                            cell_hover[(gene, contrast_label)] = (
+                                f"{lfc_value:.2f} (not significant: {ADJUSTED_P_LABEL} "
+                                f"{p_value:.2g}; shown as 0)"
+                            )
                         else:
-                            row[contrast_label] = gene_row.iloc[0][lfc_col]
+                            row[contrast_label] = lfc_value
+                            cell_hover[(gene, contrast_label)] = f"{lfc_value:.2f}"
                     else:
-                        # Gene not found in this contrast
-                        row[contrast_label] = 0  # Use 0 for non-significant/missing
+                        # Gene not found in this contrast: neutral colour, honest hover
+                        row[contrast_label] = 0
+                        cell_hover[(gene, contrast_label)] = NOT_IN_RESULTS
                 else:
                     logger.debug(f"Contrast {analysis_id}/{contrast_id} not found in DEG data")
                     row[contrast_label] = 0  # Skip this contrast
+                    cell_hover[(gene, contrast_label)] = NOT_IN_RESULTS
 
             # Only add the row if there's at least one logFC value
             if len(row) > 1:  # More than just the Gene column
@@ -741,8 +995,11 @@ class ResultsIntegrator:
                 remaining_contrast_indices = [i for i, label in enumerate(contrast_labels) if label in heatmap_df.columns]
                 contrasts = [contrasts[i] for i in remaining_contrast_indices]
                 # Recompute contrast labels after filtering to keep everything in sync
+                # (labels stay those built for the full set, so the axis matches
+                # what the user selected and numbering stays stable)
+                simplified_labels = [simplified_labels[i] for i in remaining_contrast_indices]
+                full_labels = [full_labels[i] for i in remaining_contrast_indices]
                 contrast_labels = [f"{a_id}_{c_id}" for a_id, c_id in contrasts]
-                simplified_labels = [simplify_contrast_label(a_id, c_id) for a_id, c_id in contrasts]
 
             logger.info(f"After filtering empty rows/columns: {len(heatmap_df)} genes × {len(heatmap_df.columns)} contrasts")
             logger.info(f"Filtered out {len(filtered_genes)} genes and {len(filtered_contrasts)} contrasts with no significant values")
@@ -777,23 +1034,41 @@ class ResultsIntegrator:
             else:
                 clustered_genes = heatmap_df.index.tolist()
 
-        # 2. Cluster contrasts (columns)
-        if len(heatmap_df.columns) > 1:  # Only cluster if we have multiple contrasts
+        # 2. Cluster contrasts (columns). With several datasets, each dataset
+        # keeps one contiguous block of columns (clustered within the block),
+        # so its accession can be shown once above the block.
+        label_to_accession = {
+            f"{a_id}_{c_id}": self.analysis_info.get(a_id, {}).get('accession', a_id)
+            for a_id, c_id in contrasts
+        }
+
+        def _cluster_columns(columns: List[str]) -> List[str]:
+            if len(columns) < 2:
+                return list(columns)
+            block = heatmap_df.loc[:, columns].to_numpy(dtype=float)
+            if not (block != 0).any():
+                logger.warning("Skipping contrast clustering due to lack of non-zero values")
+                return list(columns)
             try:
-                # Only cluster if we have non-zero values
-                if non_zero_count > 0:
-                    contrast_linkage = sch.linkage(pdist(heatmap_df.values.T), method='complete')
-                    contrast_order = sch.leaves_list(contrast_linkage)
-                    clustered_contrasts = [heatmap_df.columns[i] for i in contrast_order]
-                else:
-                    # Skip clustering if all values are zero
-                    logger.warning("Skipping contrast clustering due to lack of non-zero values")
-                    clustered_contrasts = heatmap_df.columns.tolist()
-            except Exception as e:
-                logger.warning(f"Error clustering contrasts: {str(e)}. Using original order.")
-                clustered_contrasts = heatmap_df.columns.tolist()
+                order = sch.leaves_list(sch.linkage(pdist(block.T), method='complete'))
+            except ValueError as e:
+                logger.warning(f"Error clustering contrasts: {e}. Using original order.")
+                return list(columns)
+            return [columns[i] for i in order]
+
+        # Blocks in accession-number order, so the same selection always draws
+        # the datasets in the same order (the contrast order can vary).
+        block_accessions = sorted(
+            dict.fromkeys(label_to_accession[c] for c in heatmap_df.columns),
+            key=_accession_sort_key,
+        )
+        if len(block_accessions) > 1:
+            clustered_contrasts = []
+            for acc in block_accessions:
+                clustered_contrasts.extend(_cluster_columns(
+                    [c for c in heatmap_df.columns if label_to_accession[c] == acc]))
         else:
-            clustered_contrasts = heatmap_df.columns.tolist()
+            clustered_contrasts = _cluster_columns(heatmap_df.columns.tolist())
 
         # Reorder the DataFrame according to clustering
         heatmap_df = heatmap_df.loc[clustered_genes, clustered_contrasts]
@@ -809,7 +1084,9 @@ class ResultsIntegrator:
                 'clustered_genes': clustered_genes,
                 'clustered_contrasts': clustered_contrasts,
                 'simplified_labels': simplified_labels,
+                'full_labels': full_labels,
                 'contrast_labels': contrast_labels,
+                'column_accessions': [label_to_accession[c] for c in clustered_contrasts],
                 'p_value_threshold': p_thresh,
                 'lfc_threshold': lfc_thresh,
             }
@@ -834,18 +1111,27 @@ class ResultsIntegrator:
         # Allow taller figures when many genes, but cap to avoid extreme sizes
         height_px = max(650, min(4500, dynamic_height))
 
-        # Left margin scales with gene label length and font size
-        left_margin = max(250, min(520, int(40 + max_gene_label_len * font_size * 0.7)))
+        # Left margin scales with gene label length and font size; automargin
+        # (set below) grows it further if the tick labels need more room.
+        left_margin = max(80, min(520, int(40 + max_gene_label_len * font_size * 0.7)))
+        # Bottom margin for one-line labels at HEATMAP_TICK_ANGLE (automargin can grow it)
+        bottom_margin = int(40 + SHORT_LABEL_CHARS * font_size * 0.6 * abs(math.sin(math.radians(HEATMAP_TICK_ANGLE))))
 
         # Create the heatmap
         fig = px.imshow(
             heatmap_df,
             color_continuous_scale='RdBu_r',  # Red-Blue color scale, reversed to match biology convention
             labels=dict(x="Contrast", y="Gene", color="Log2FC"),
-            title="Differential Expression Heatmap (Log2 Fold Change)",
+            title=(
+                "Differential Expression Heatmap (Log2 Fold Change)"
+                f"<br><sup>Coloured cells: {ADJUSTED_P_LABEL} < {p_thresh} and |Log2FC| > {lfc_thresh}</sup>"
+            ),
             aspect="auto",  # Maintain aspect ratio based on data
             height=height_px,
-            width=max(700, min(1700, len(heatmap_df.columns) * 90)),  # Dynamic width based on number of contrasts
+            # Minimum readable width: each contrast column needs room for up to
+            # three vertical label lines. The tab shows the chart in a scrolling
+            # container, so a narrow page scrolls instead of squeezing columns.
+            width=max(700, left_margin + len(heatmap_df.columns) * HEATMAP_MIN_COL_PX + 160),
             zmin=-max_abs_value,  # Symmetrical color scale
             zmax=max_abs_value,
             color_continuous_midpoint=0  # Ensure white is at 0
@@ -853,11 +1139,15 @@ class ResultsIntegrator:
 
         # Improve layout
         fig.update_layout(
-            margin=dict(l=left_margin, r=20, t=60, b=120),
+            margin=dict(l=left_margin, r=20, t=80, b=bottom_margin),
             coloraxis_colorbar=dict(title="Log2FC"),
             font_family="Inter, sans-serif",
             font_size=font_size
         )
+
+        # Let both axes reserve the space their tick labels need
+        fig.update_xaxes(automargin=True)
+        fig.update_yaxes(automargin=True)
 
         # Configure grid lines
         if show_grid_lines:
@@ -872,8 +1162,8 @@ class ResultsIntegrator:
         # Create a 3D array with gene logFC, contrast description, contrast formula, accession info, and original contrast name
         # First dimension: rows (genes)
         # Second dimension: columns (contrasts)
-        # Third dimension: data types (0: contrast description, 1: accession, 2: original contrast name, 3: contrast formula)
-        hover_info = np.empty((*heatmap_df.shape, 4), dtype=object)
+        # Third dimension: data types (0: contrast description, 1: accession, 2: original contrast name, 3: contrast formula, 4: Log2FC hover text)
+        hover_info = np.empty((*heatmap_df.shape, 5), dtype=object)
 
         # Keep track of original contrast names for both hover and axis labels
         original_contrast_names = []
@@ -894,30 +1184,31 @@ class ResultsIntegrator:
                 # Get accession ID
                 accession = self.analysis_info.get(analysis_id, {}).get('accession', analysis_id)
 
-                # Get simplified name for hover consistency
-                simplified_name = simplified_labels[original_idx]
-                if j == 0 and i == 0:  # Only collect once per contrast
-                    original_contrast_names.append(simplified_name)
+                # Full (unwrapped, untruncated) contrast name for the hover
+                full_name = full_labels[original_idx]
+                if i == 0:  # Only collect once per contrast
+                    original_contrast_names.append(full_name)
 
-                # Get contrast formula/expression if available
-                expression = ""
-                try:
-                    if hasattr(self, "contrast_info") and contrast_id in self.contrast_info:
-                        expression = self.contrast_info[contrast_id].get('expression', '') or ''
-                except Exception:
-                    expression = ''
+                # Contrast formula/expression for this dataset's contrast
+                entry = self.get_contrast_entry(analysis_id, contrast_id) or {}
+                expression = entry.get('expression', '')
+                if not isinstance(expression, str):
+                    expression = ''  # NaN from a blank CSV cell
 
-                # Store description, accession, simplified contrast name, and expression
-                hover_info[i, j, 0] = description
-                hover_info[i, j, 1] = accession
-                hover_info[i, j, 2] = simplified_name
-                hover_info[i, j, 3] = expression
+                # Store description, accession, full contrast name, and expression
+                hover_info[i, j, 0] = wrap_hover_text(description)
+                hover_info[i, j, 1] = html.escape(str(accession), quote=False)
+                hover_info[i, j, 2] = html.escape(full_name, quote=False)
+                hover_info[i, j, 3] = wrap_hover_text(expression, max_chars=FORMULA_MAX_CHARS)
+                hover_info[i, j, 4] = html.escape(
+                    cell_hover.get((gene, clustered_col), NOT_IN_RESULTS), quote=False
+                )
 
         # Update hover template with conditional formatting, accession, and description
         hover_template = (
             "<b>Gene:</b> %{y}<br>" +
-            "<b>Contrast:</b> %{customdata[2]}<br>" +  # Use original contrast name
-            "<b>Log2FC:</b> %{z:.2f}<br>" +
+            "<b>Contrast:</b> %{customdata[2]}<br>" +  # Full contrast name
+            "<b>Log2FC:</b> %{customdata[4]}<br>" +
             "<b>Accession:</b> %{customdata[1]}<br>" +
             "<b>Description:</b> %{customdata[0]}<br>" +
             "<b>Formula:</b> %{customdata[3]}<br>" +
@@ -950,9 +1241,51 @@ class ResultsIntegrator:
                 tickmode="array",
                 tickvals=tick_vals,
                 ticktext=clustered_simplified_labels,
-                tickangle=45,
-                title="Biological contrast"
+                # Short one-line labels at an angle: about 28 px per column is
+                # enough for neighbours not to overlap
+                tickangle=HEATMAP_TICK_ANGLE,
+                title=dict(text="Biological contrast", standoff=12)
             )
+
+            # Dataset accession once per block of columns, with separators
+            column_accessions = [label_to_accession[c] for c in clustered_contrasts]
+            blocks = _accession_blocks(column_accessions)
+            if len(blocks) > 1:
+                for acc, start, end in blocks:
+                    fig.add_annotation(
+                        x=(start + end) / 2, y=1.0, xref="x", yref="paper",
+                        text=f"<b>{html.escape(acc, quote=False)}</b>",
+                        showarrow=False, yanchor="bottom", yshift=4,
+                        font=dict(size=font_size),
+                    )
+                    fig.add_shape(type="line", xref="x", yref="paper",
+                                  x0=start - 0.45, x1=end + 0.45, y0=1.0, y1=1.0,
+                                  line=dict(color="#555", width=1.5))
+                for _, start, _ in blocks[1:]:
+                    fig.add_shape(type="line", xref="x", yref="paper",
+                                  x0=start - 0.5, x1=start - 0.5, y0=0, y1=1,
+                                  line=dict(color="#333", width=1.5))
+                fig.update_layout(margin=dict(t=110))
+
+            # Numbered key: one row per column, for the table under the chart,
+            # its CSV download and the reproduction package
+            label_to_pair = {f"{a_id}_{c_id}": (a_id, c_id) for a_id, c_id in contrasts}
+            full_mapping = dict(zip(contrast_labels, full_labels))
+            column_key = []
+            for number, col in enumerate(clustered_contrasts, start=1):
+                a_id, c_id = label_to_pair[col]
+                description = self._get_contrast_description(a_id, c_id)
+                column_key.append({
+                    "#": number,
+                    "Label": html.unescape(label_mapping[col]),
+                    "Dataset": label_to_accession[col],
+                    "Contrast": full_mapping[col],
+                    "Description": description if isinstance(description, str) else "",
+                })
+            fig.update_layout(meta={"column_key": column_key,
+                                    "dataset_blocks": [list(b) for b in blocks]})
+            self.last_heatmap_context['column_key'] = column_key
+            self.last_heatmap_context['dataset_blocks'] = [list(b) for b in blocks]
 
         # Save to file if specified
         if output_file is not None:
@@ -1069,73 +1402,21 @@ class ResultsIntegrator:
                 logger.warning(f"No matching genes found in CPM data for {analysis_id}")
                 continue
 
-            # Get the sample groups from the edger_analysis_samples.csv file
+            # Groups and titles from edger_analysis_samples.csv, keyed by sample ID.
+            # load_data() already named the CPM columns by sample ID.
             sample_to_group = {}
-
-            # Helper function to find first existing file
-            def first_existing(paths):
-                for path in paths:
-                    if os.path.isfile(path):
-                        return path
-                return None
-
-            # Look inside the current analysis directory first
-            analysis_dir = os.path.join(self.results_dir, analysis_id)
-            sample_file_locations = [
-                os.path.join(analysis_dir, "metadata", "edger_analysis_samples.csv"),  # New primary location
-                os.path.join(analysis_dir, "edger_analysis_samples.csv"),  # Old location for backward compatibility
-                os.path.join(self.results_dir, "edger_analysis_samples.csv"),
-                os.path.join(os.path.dirname(self.results_dir), "edger_analysis_samples.csv")
-            ]
-
-            edger_samples_file = first_existing(sample_file_locations)
+            sample_to_title = {}
+            edger_samples_file = find_sample_table(self.results_dir, analysis_id)
             if edger_samples_file:
-                logger.info(f"Found sample mapping file at {edger_samples_file}")
-
-            if edger_samples_file:
-                try:
-                    # First try loading the file to check its structure
-                    sample_mapping_df = pd.read_csv(edger_samples_file, nrows=0)
-
-                    # If the first column has no name or starts with 'Unnamed', it's probably an index
-                    first_col = sample_mapping_df.columns[0]
-                    has_index = first_col == '' or first_col.startswith('Unnamed')
-
-                    # Now load the full file with appropriate index_col setting
-                    sample_mapping_df = pd.read_csv(edger_samples_file, index_col=0 if has_index else None)
-                    logger.info(f"Loaded sample mapping with columns: {', '.join(sample_mapping_df.columns)}")
-
-                    # Find the group column from analysis_info
-                    group_col = None
-                    if self.analysis_info and analysis_id in self.analysis_info and 'merged_column' in self.analysis_info[analysis_id]:
-                        group_col = self.analysis_info[analysis_id]['merged_column']
-                        logger.info(f"Using merged column '{group_col}' from analysis_info")
-
-                    if group_col and group_col in sample_mapping_df.columns:
-                        # Look for a 'Sample1', 'Sample2', etc. naming pattern in CPM columns
-                        cpm_columns = self.cpm_data[analysis_id].columns.tolist()
-                        sample_cols = [col for col in cpm_columns if col.startswith('Sample') and col != 'Gene']
-
-                        if sample_cols:
-                            # Create a mapping from sample name to group
-                            for i in range(len(sample_mapping_df)):
-                                if i < len(sample_cols):  # Ensure we don't go out of bounds
-                                    sample_key = sample_cols[i]
-                                    sample_to_group[sample_key] = sample_mapping_df.iloc[i][group_col]
-                            logger.info(f"Created mapping for {len(sample_to_group)} samples using Sample# pattern")
-                        else:
-                            # Fall back to index-based mapping
-                            for i in range(len(sample_mapping_df)):
-                                # Use sample index (i) as the key (starting with Sample1)
-                                sample_key = f"Sample{i+1}"
-                                sample_to_group[sample_key] = sample_mapping_df.iloc[i][group_col]
-                            logger.info(f"Created mapping for {len(sample_to_group)} samples using index")
-                    else:
-                        logger.warning(f"No group column found in sample mapping file")
-                except Exception as e:
-                    logger.warning(f"Error loading sample mapping file: {str(e)}")
+                sample_mapping_df = read_sample_table(edger_samples_file)
+                group_col = self.analysis_info.get(analysis_id, {}).get('merged_column')
+                if group_col and group_col in sample_mapping_df.columns:
+                    sample_to_group = sample_groups(sample_mapping_df, group_col).to_dict()
+                else:
+                    logger.warning(f"Group column {group_col!r} not in {edger_samples_file}")
+                sample_to_title = sample_titles(sample_mapping_df).to_dict()
             else:
-                logger.warning("Could not find edger_analysis_samples.csv file. Using default sample names.")
+                logger.warning(f"No {SAMPLE_TABLE_NAME} for {analysis_id}; groups not known")
 
             # Convert to long format
             melted_df = cpm_filtered.melt(
@@ -1180,6 +1461,8 @@ class ResultsIntegrator:
             # Create custom hover text with all the information we want (after Group is assigned)
             melted_df['HoverText'] = (
                 "<b>Dataset:</b> " + melted_df['DatasetDisplay'] + "<br>" +
+                "<b>Sample:</b> " + melted_df['Sample'].astype(str) +
+                melted_df['Sample'].map(sample_to_title).fillna("").map(lambda t: f" ({t})" if t else "") + "<br>" +
                 "<b>Group:</b> " + melted_df['Group'].astype(str) + "<br>" +
                 "<b>Expression:</b> " + melted_df['Expression'].round(2).astype(str)
             )
@@ -1218,18 +1501,6 @@ class ResultsIntegrator:
             plot_df['LogExpression'] = np.log2(plot_df['Expression'] + 1)
             y_axis_title = "Log<sub>2</sub>(CPM+1)"
 
-        # Adaptive facet spacing to reduce label overlap when few rows
-        if n_rows <= 1:
-            facet_row_spacing = 0.06
-        elif n_rows == 2:
-            facet_row_spacing = 0.05
-        elif n_rows <= 4:
-            facet_row_spacing = 0.04
-        else:
-            max_allowed_row_spacing = (1.0 / (n_rows - 1)) - 1e-6
-            facet_row_spacing = min(0.03, max_allowed_row_spacing)
-            if facet_row_spacing < 0:
-                facet_row_spacing = 0.0
         facet_col_spacing = 0.03
 
         # Build combined x-axis labels in the format: "GSEXXXX - group <group>"
@@ -1243,14 +1514,36 @@ class ResultsIntegrator:
                 if isinstance(r.get('Analysis', None), str) else r.get('Analysis', ''), axis=1
             )
 
-        # Construct the x-axis label using only the group name (no accession)
-        full_label_series = plot_df['Group'].astype(str)
+        # x-axis label per (dataset, group). The label is also the box key, so
+        # it must be unique: a cut label shared by two groups would pool their
+        # samples into one box. build_group_labels drops the prefix shared by a
+        # dataset's groups, wraps the rest and numbers any remaining clash.
+        group_pairs = list(zip(plot_df['Accession'].astype(str), plot_df['Group'].astype(str)))
+        group_labels = build_group_labels(group_pairs)
+        plot_df['XLabel'] = [group_labels[pair] for pair in group_pairs]
+        x_order = list(dict.fromkeys(plot_df['XLabel']))
+        self.last_expression_group_labels = dict(group_labels)
 
-        # Truncate labels longer than 20 characters and append '...'
-        MAX_LABEL_CHARS = 20
-        plot_df['XLabel'] = full_label_series.apply(
-            lambda s: s if len(str(s)) <= MAX_LABEL_CHARS else str(s)[:MAX_LABEL_CHARS] + '...'
+        # Vertical tick labels: reserve their height between facet rows so the
+        # next row's gene title and the labels do not overlap.
+        tick_font_px = 10
+        longest_line = max(
+            (len(html.unescape(line)) for lab in x_order for line in lab.split("<br>")),
+            default=10,
         )
+        label_px = int(longest_line * tick_font_px * 0.62) + 10
+        if n_rows <= 2:
+            plot_px_per_row = 420
+        elif n_rows <= 6:
+            plot_px_per_row = 380
+        else:
+            plot_px_per_row = 340
+        height_per_row = plot_px_per_row + label_px + 60
+        total_height = height_per_row * max(1, n_rows)
+        if n_rows > 1:
+            facet_row_spacing = min((label_px + 60) / total_height, 0.95 / (n_rows - 1))
+        else:
+            facet_row_spacing = 0.0
 
         # Build an explicit color map for datasets to ensure colors are embedded (important for static export)
         try:
@@ -1280,24 +1573,17 @@ class ResultsIntegrator:
             labels={'LogExpression': y_axis_title, 'DatasetDisplay': 'Dataset'},
             facet_row_spacing=facet_row_spacing,
             facet_col_spacing=facet_col_spacing,
-            color_discrete_map=color_discrete_map
+            color_discrete_map=color_discrete_map,
+            category_orders={'XLabel': x_order},
         )
 
-        # Layout adjustments optimized for readability (adaptive per-row height)
-        if n_rows <= 2:
-            height_per_row = 560
-        elif n_rows <= 4:
-            height_per_row = 520
-        elif n_rows <= 6:
-            height_per_row = 480
-        elif n_rows <= 10:
-            height_per_row = 460
-        else:
-            height_per_row = 440
-
+        # Each facet needs ~44 px per group for vertical multi-line labels; the
+        # tab shows the chart in a horizontally scrolling container when the
+        # page is narrower than this width.
+        facet_px = max(500, 44 * len(x_order) + 80)
         fig.update_layout(
-            height=height_per_row * max(1, n_rows),
-            width=600 * facet_col_wrap,  # 600px per column (wider for better boxplot visibility)
+            height=total_height,
+            width=facet_px * facet_col_wrap,
             legend_title_text="Dataset",
             margin=dict(l=40, r=20, t=80, b=6),
             font_family="Inter, sans-serif",
@@ -1319,9 +1605,9 @@ class ResultsIntegrator:
             fig.update_xaxes(visible=False)
         else:
             # Show axis tick labels on all facets with minimal standoff, align close to plot, and no axis title
-            fig.update_xaxes(visible=True, showticklabels=True, tickangle=45,
+            fig.update_xaxes(visible=True, showticklabels=True, tickangle=-90,
                              ticklabelstandoff=0, automargin=True, title_text="",
-                             tickfont=dict(size=10))
+                             tickfont=dict(size=tick_font_px))
 
         # Add light dotted vertical gridlines to separate groups across the full plotting area
         if show_grid_lines:
@@ -1410,8 +1696,29 @@ class ResultsIntegrator:
 
         return fig
 
+    def deg_source(self, analysis_id: str, contrast_id: str) -> str:
+        """Name the DEG file behind a contrast, for error messages."""
+        path = self.deg_file_paths.get(analysis_id, {}).get(contrast_id)
+        return f"DEG file {path}" if path else f"DEG table for {analysis_id}/{contrast_id}"
+
+    def get_contrast_entry(self, analysis_id: str, contrast_id: str) -> Optional[Dict]:
+        """Return the contrast record for one dataset's contrast, or None.
+
+        Looks up ``(analysis_id, contrast_id)`` first, so two datasets that use
+        the same contrast name keep their own description and formula. Falls
+        back to the name-only table for results without per-dataset metadata.
+        """
+        entry = self.contrast_info_by_analysis.get((analysis_id, contrast_id))
+        if entry is not None:
+            return entry
+        return self.contrast_info.get(contrast_id)
+
     def _get_contrast_description(self, analysis_id: str, contrast_id: str) -> str:
         """Get the description for a contrast from the loaded contrast info."""
+        keyed = self.contrast_info_by_analysis.get((analysis_id, contrast_id))
+        if keyed is not None and isinstance(keyed.get('description'), str) and keyed['description']:
+            return keyed['description']
+
         # Try exact match first
         if hasattr(self, "contrast_info") and contrast_id in self.contrast_info:
             return self.contrast_info[contrast_id].get('description', f"Contrast: {contrast_id}")
@@ -1635,6 +1942,15 @@ class ResultsIntegrator:
         # Update the contrast_info with new consistent names
         self.contrast_info.update(new_contrast_info)
 
+        # analysis_info.json also lists each dataset's contrasts; use it for any
+        # (analysis_id, contrast) pair that had no contrasts.csv row.
+        for (analysis_id, contrast_name), contrast in contrast_analysis_mapping.items():
+            self.contrast_info_by_analysis.setdefault((analysis_id, contrast_name), {
+                'name': contrast_name,
+                'description': contrast.get('description', ''),
+                'expression': contrast.get('expression', ''),
+            })
+
         logger.info(f"Created {len(new_contrast_info)} consistent contrast names")
 
     def create_integrated_report(self,
@@ -1663,7 +1979,7 @@ class ResultsIntegrator:
         max_genes : int
             Maximum number of genes to include in visualizations
         p_value_threshold : float, optional
-            Override the default p-value threshold for gene selection
+            Override the default adjusted p-value (BH) threshold for gene selection
         lfc_threshold : float, optional
             Override the default log fold change threshold for gene selection
         hide_x_labels : bool
@@ -1858,7 +2174,7 @@ def main():
         "--pvalue_threshold",
         type=float,
         default=0.05,
-        help="P-value threshold for considering genes as differentially expressed (default: 0.05)"
+        help="Adjusted p-value (BH) threshold for considering genes as differentially expressed (default: 0.05)"
     )
     parser.add_argument(
         "--lfc_threshold",

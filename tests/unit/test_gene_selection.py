@@ -1,6 +1,7 @@
 """Tests for gene_selection module."""
 import pytest
 import pandas as pd
+from uorca.core.pvalues import MissingAdjustedPValueError
 from uorca.core.gene_selection import (
     identify_frequent_degs,
     get_all_genes_from_cpm,
@@ -68,7 +69,7 @@ def test_identify_frequent_degs_empty():
 
 
 def test_identify_frequent_degs_missing_columns(sample_analysis_info):
-    """Test with DEG data missing required columns."""
+    """DEG data without adj.P.Val raises rather than being silently skipped."""
     bad_deg_data = {
         'GSE123456': {
             'Treatment_vs_Control': pd.DataFrame({
@@ -78,16 +79,15 @@ def test_identify_frequent_degs_missing_columns(sample_analysis_info):
         }
     }
 
-    result = identify_frequent_degs(
-        deg_data=bad_deg_data,
-        contrasts=[('GSE123456', 'Treatment_vs_Control')],
-        top_n=10,
-        p_thresh=0.05,
-        lfc_thresh=1.0
-    )
-
-    # Should handle gracefully and return empty
-    assert result == []
+    # A table without adj.P.Val fails loudly instead of being skipped
+    with pytest.raises(MissingAdjustedPValueError, match="GSE123456/Treatment_vs_Control"):
+        identify_frequent_degs(
+            deg_data=bad_deg_data,
+            contrasts=[('GSE123456', 'Treatment_vs_Control')],
+            top_n=10,
+            p_thresh=0.05,
+            lfc_thresh=1.0
+        )
 
 
 def test_get_all_genes_from_cpm(sample_cpm_data):

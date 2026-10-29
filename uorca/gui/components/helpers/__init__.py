@@ -150,6 +150,36 @@ def plotly_fig_to_image_bytes(fig: go.Figure, fmt: str, width: Optional[int] = N
         return None
 
 
+def scroll_container_css(key: str, min_width_px: int) -> str:
+    """CSS for ``st.container(key=key)``: its chart is at least ``min_width_px``
+    wide, and the container scrolls horizontally when the page is narrower.
+
+    Streamlit sizes a ``use_container_width`` chart from the element container
+    it sits in, so the minimum width goes on that element container.
+    """
+    w = int(min_width_px)
+    return (
+        "<style>"
+        f".st-key-{key} {{ overflow-x: auto; overflow-y: hidden; }}"
+        f".st-key-{key} [data-testid='stElementContainer'] {{ min-width: {w}px; }}"
+        "</style>"
+    )
+
+
+def render_scrollable_plotly(fig: go.Figure, key: str, min_width_px: Optional[int] = None) -> None:
+    """Show a Plotly figure across the page width, but never narrower than
+    ``min_width_px`` (default: the figure's ``layout.width``).
+
+    On a narrow page the chart keeps its minimum width and its container
+    scrolls horizontally, instead of squeezing heatmap columns or box-plot
+    groups until their labels overlap.
+    """
+    width = min_width_px if min_width_px is not None else int(getattr(fig.layout, 'width', None) or 0)
+    st.markdown(scroll_container_css(key, width), unsafe_allow_html=True)
+    with st.container(key=key):
+        st.plotly_chart(fig, use_container_width=True)
+
+
 def plotly_fig_to_pdf_bytes(fig: go.Figure, width: Optional[int] = None, height: Optional[int] = None, scale: float = 2.0) -> Optional[bytes]:
     """
     Convert a Plotly figure to PDF bytes for download.
@@ -902,7 +932,7 @@ def cached_identify_important_genes(
         results_dir: Path to results directory
         selected_contrasts: List of (analysis_id, contrast_id) tuples to analyse
         top_frequent: Number of top frequently DE genes to return
-        p_value_threshold: P-value threshold for significance
+        p_value_threshold: Adjusted p-value (BH) threshold for significance
         lfc_threshold: Log fold change threshold for significance
 
     Returns:
@@ -917,7 +947,7 @@ def cached_identify_important_genes(
         sorted_contrasts = sorted(selected_contrasts)
 
         logger.info(f"Processing {len(sorted_contrasts)} selected contrasts for gene identification")
-        logger.info(f"Using thresholds: P-value < {p_value_threshold}, |logFC| > {lfc_threshold}")
+        logger.info(f"Using thresholds: adjusted p-value (BH) < {p_value_threshold}, |logFC| > {lfc_threshold}")
 
         # Use business logic module
         top_genes = gene_selection.identify_frequent_degs(

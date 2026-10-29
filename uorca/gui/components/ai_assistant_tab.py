@@ -16,7 +16,7 @@ import pandas as pd
 import pydantic
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Iterable, List, Optional, Tuple
 from datetime import datetime
 
 from uorca.gui.ai import (
@@ -31,7 +31,6 @@ from uorca.gui.ai import (
     run_contrast_relevance_with_selection,
     SelectedContrast
 )
-from uorca.gui.mcp_server import get_filtered_dataframe
 
 from .helpers import (
     check_ai_generating,
@@ -51,7 +50,7 @@ from .helpers.ai_agent_tool_logger import (
     get_current_log_file,
     read_log_file_contents
 )
-from uorca.gui.results_integration import ResultsIntegrator
+from uorca.gui.results_integration import ResultsIntegrator, get_adjusted_p_column
 
 # Set up fragment decorator
 setup_fragment_decorator()
@@ -153,6 +152,40 @@ def load_query_config(results_dir: Optional[str] = None) -> Optional[str]:
 
 
 # Check for AI functionality availability
+
+def _build_expression_rows(ri: ResultsIntegrator, genes: Iterable[str],
+                           contrasts: List[Tuple[str, str]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Rows of (gene, contrast, logFC, adjusted p-value) for the AI results table.
+
+    Uses adj.P.Val only. An adj.P.Val of 0.0 is kept as 0.0, and a DEG table
+    without adj.P.Val raises MissingAdjustedPValueError naming the file; the
+    raw P.Value is never shown under the adjusted label.
+
+    Returns:
+        (rows, genes found in none of the contrasts)
+    """
+    rows: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for gene in genes:
+        hit = False
+        for aid, cid in contrasts:
+            if aid in ri.deg_data and cid in ri.deg_data[aid]:
+                df = ri.deg_data[aid][cid]
+                if 'Gene' in df.columns and gene in df['Gene'].values:
+                    hit = True
+                    p_col = get_adjusted_p_column(df, ri.deg_source(aid, cid))
+                    rec = df.loc[df['Gene'] == gene].iloc[0]
+                    rows.append({
+                        'Gene': gene,
+                        'Dataset': aid,
+                        'Contrast': cid,
+                        'logFC': rec.get("logFC", 0),
+                        'Adjusted p-value (BH)': rec[p_col],
+                    })
+        if not hit:
+            missing.append(gene)
+    return rows, missing
+
 
 # AI components are now always available since they're imported at the top
 UORCA_AGENT_AVAILABLE = True
@@ -1060,24 +1093,7 @@ def _display_unified_ai_results(
 
     # Prepare data for all tabs
     if ri and ri.deg_data:
-        rows, missing = [], []
-        for gene in genes:
-            hit = False
-            for aid, cid in contrasts:
-                if aid in ri.deg_data and cid in ri.deg_data[aid]:
-                    df = ri.deg_data[aid][cid]
-                    if 'Gene' in df.columns and gene in df['Gene'].values:
-                        hit = True
-                        rec = df.loc[df['Gene'] == gene].iloc[0]
-                        rows.append({
-                            'Gene': gene,
-                            'Dataset': aid,
-                            'Contrast': cid,
-                            'logFC': rec.get("logFC", 0),
-                            'P-value': rec.get("adj.P.Val") or rec.get("P.Value", 1)
-                        })
-            if not hit:
-                missing.append(gene)
+        rows, missing = _build_expression_rows(ri, genes, contrasts)
     else:
         rows, missing = [], []
 
@@ -1235,7 +1251,7 @@ def _display_unified_ai_results(
                 use_container_width=True,
                 column_config={
                     "logFC": st.column_config.NumberColumn("Log2FC", format="%.2f"),
-                    "P-value": st.column_config.NumberColumn("P-value", format="%.2e")
+                    "Adjusted p-value (BH)": st.column_config.NumberColumn("Adjusted p-value (BH)", format="%.2e")
                 }
             )
 
@@ -1325,6 +1341,8 @@ def _display_unified_ai_results(
 
             # AI agent's working dataset
             try:
+                # Imported here so the AI tab loads without the mcp package
+                from uorca.gui.mcp_server import get_filtered_dataframe
                 filtered_df = get_filtered_dataframe()
 
                 if not filtered_df.empty:
@@ -1893,7 +1911,7 @@ def _display_tool_calls_detailed(tool_calls: List[Dict]):
                                                 'Gene': item.get('Gene', ''),
                                                 'Contrast': item.get('contrast_id', ''),
                                                 'logFC': item.get('logFC', ''),
-                                                'P-value': item.get('pvalue', '')
+                                                'Adjusted p-value (BH)': item.get('pvalue', '')
                                             })
                                     if df_data:
                                         import pandas as pd
