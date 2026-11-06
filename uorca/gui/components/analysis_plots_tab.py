@@ -4,8 +4,10 @@ Analysis Plots Tab for UORCA Explorer.
 This tab displays quality control and differential expression plots from individual datasets.
 """
 
+import io
 import os
 import logging
+import zipfile
 import pandas as pd
 import streamlit as st
 import traceback
@@ -22,8 +24,20 @@ from .helpers import (
     is_analysis_successful,
     get_valid_contrasts_from_analysis_info,
     validate_contrast_has_deg_data,
+    PACKAGE_WARNINGS_FILE,
     create_dataset_download_package,
     generate_plot_filename
+)
+from uorca.gui.sample_structure import (
+    DEFAULT_TOP_GENES,
+    caption as structure_caption,
+    create_clustering_heatmap,
+    create_pca_figure,
+    group_display,
+    known_groups,
+    run_pca,
+    sample_group_series,
+    top_variable_genes,
 )
 from uorca.gui.results_integration import ResultsIntegrator, ADJUSTED_P_LABEL, ADJUSTED_P_HELP, RAW_P_LABEL
 # R script bundling is now integrated into create_dataset_download_package via components['r_script']
@@ -31,10 +45,8 @@ from uorca.gui.results_integration import ResultsIntegrator, ADJUSTED_P_LABEL, A
 # Import single analysis plotting functions
 try:
     from uorca.gui.single_analysis_plots import (
-        create_pca_plot,
         create_volcano_plot,
         create_ma_plot,
-        create_deg_heatmap,
         load_sample_groups,
         load_sample_titles,
     )
@@ -189,7 +201,7 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
                 "Generate PDF versions of DEG plots (slower)",
                 value=st.session_state[f"download_components_{selected_dataset}"].get('include_pdfs', False),
                 key=f"checkbox_pdfs_{selected_dataset}",
-                help="Generate high-resolution PDF versions of volcano plots, MA plots, and heatmaps for each contrast. This significantly increases processing time but provides publication-quality vector graphics."
+                help="Generate high-resolution PDF versions of the volcano and MA plots for each contrast, and of the PCA plot and clustering heatmap. This significantly increases processing time but provides publication-quality vector graphics."
             )
             
             # Update session state
@@ -250,6 +262,8 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
                 # Step 2: Download ready
                 package_data = st.session_state[f"package_ready_{selected_dataset}"]
                 st.success("**Step 2**: Your package is ready! Click the button below to download.")
+                for problem in _package_warnings(package_data['bytes']):
+                    st.warning(f"Part of the package is missing: {problem}")
                 
                 col1, col2, col3 = st.columns([2, 3, 2])
                 with col1:
@@ -290,6 +304,9 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
         st.error(f"Could not find RNAseqAnalysis folder for {selected_dataset}")
         return
 
+    # Unsupervised views of the samples
+    _render_sample_structure(ri, selected_dataset, base_path, groups)
+
     # Display QC plots
     _render_qc_plots(ri, selected_dataset, base_path, groups)
 
@@ -298,6 +315,15 @@ def _render_analysis_plots_interface(ri: ResultsIntegrator, results_dir: str):
 
     # Display metadata section
     _render_metadata_section(ri, selected_dataset)
+
+
+def _package_warnings(package_bytes: bytes) -> List[str]:
+    """Lines of the package's PACKAGE_WARNINGS.txt (parts that could not be made)."""
+    with zipfile.ZipFile(io.BytesIO(package_bytes)) as zf:
+        for name in zf.namelist():
+            if name.endswith("/" + PACKAGE_WARNINGS_FILE):
+                return [line for line in zf.read(name).decode().splitlines() if line.strip()]
+    return []
 
 
 @log_streamlit_function
@@ -326,10 +352,6 @@ def _render_qc_plots(ri: ResultsIntegrator, selected_dataset: str, base_path: st
 
     # Define QC plot files and descriptions
     qc_plot_files = {
-        "MDS Plot": {
-            "file": os.path.join(base_path, "MDS.png"),
-            "description": "**Multi-dimensional scaling plot** showing sample relationships based on their gene expression profiles. This is analogous to a PCA plot.\n\n- **What to look for**: Samples from the same experimental group should cluster together. Outliers may indicate technical issues.\n\n- **Technical details**: Distances on the plot represent leading log2-fold changes between samples (the average of the largest absolute log2-fold changes)."
-        },
         "Filtering Density": {
             "file": os.path.join(base_path, "filtering_density.png"),
             "description": "**Density plot** showing distribution of gene expression levels (log-CPM) before and after filtering low-expression genes.\n\n- **What to look for**: After filtering (red curve), the left peak of very low-expressed genes should be reduced or eliminated.\n\n- **Technical details**: Low-expression genes are filtered out because they provide little statistical power for differential expression analysis and can increase the multiple testing burden."
@@ -349,49 +371,108 @@ def _render_qc_plots(ri: ResultsIntegrator, selected_dataset: str, base_path: st
     }
 
     # Display QC plots in tabs
-    plot_tabs = st.tabs(["Quality Overview", "Expression Filtering", "Normalisation", "Variance Modeling"])
+    plot_tabs = st.tabs(["Expression Filtering", "Normalisation", "Variance Modeling"])
 
-    # Tab 1: Quality Overview (interactive PCA plot replacing MDS)
     with plot_tabs[0]:
-        _render_quality_overview_tab(ri, selected_dataset, qc_plot_files, groups)
-
-    # Tab 2: Expression Filtering
-    with plot_tabs[1]:
         _render_filtering_tab(qc_plot_files)
 
-    # Tab 3: Normalisation
-    with plot_tabs[2]:
+    with plot_tabs[1]:
         _render_normalisation_tab(qc_plot_files)
 
-    # Tab 4: Variance Modeling
-    with plot_tabs[3]:
+    with plot_tabs[2]:
         _render_variance_modeling_tab(qc_plot_files)
 
 
-@log_streamlit_function
-def _render_quality_overview_tab(ri: ResultsIntegrator, selected_dataset: str, qc_plot_files: Dict, groups: Optional[Dict]):
-    """Render the quality overview tab with PCA plot."""
-    pca_fig = None
-    if ri and selected_dataset in ri.cpm_data and SINGLE_PLOTS_AVAILABLE:
-        try:
-            cpm_df = ri.cpm_data[selected_dataset]
-            titles = load_sample_titles(ri.results_dir, selected_dataset)
-            pca_fig = create_pca_plot(cpm_df, groups, sample_titles=titles)
-        except Exception as e:
-            logger.exception(f"Interactive PCA failed for {selected_dataset}")
-            st.error(f"Could not draw the interactive PCA plot: {type(e).__name__}: {e}")
-            pca_fig = None
+MDS_DESCRIPTION = (
+    "**Multi-dimensional scaling plot** from the R pipeline (limma `plotMDS`), labelled by GSM accession.\n\n"
+    "- **What to look for**: Samples from the same experimental group should cluster together. Outliers may indicate technical issues.\n\n"
+    "- **Technical details**: Distances on the plot represent leading log2-fold changes between samples (the average of the largest absolute log2-fold changes)."
+)
 
-    if pca_fig is not None:
-        st.plotly_chart(pca_fig, use_container_width=True)
-        with st.expander("What does this plot mean?", expanded=True):
-            st.markdown(qc_plot_files["MDS Plot"]["description"])
-    elif os.path.exists(qc_plot_files["MDS Plot"]["file"]):
-        st.image(qc_plot_files["MDS Plot"]["file"])
-        with st.expander("What does this plot mean?", expanded=True):
-            st.markdown(qc_plot_files["MDS Plot"]["description"])
-    else:
-        st.info("MDS plot not available for this dataset.")
+
+@log_streamlit_function
+def _render_sample_structure(ri: ResultsIntegrator, selected_dataset: str, base_path: str, groups: Optional[Dict]):
+    """PCA, a clustering heatmap and R's MDS plot: views that use no contrast or DE result."""
+    st.subheader("Sample structure")
+    st.caption(
+        "Unsupervised views of how the samples relate to each other. They use no contrast and no "
+        "differential expression result. Colours show the analysis groups."
+    )
+    pca_tab, heatmap_tab, mds_tab = st.tabs(["PCA", "Clustering heatmap", "MDS (R)"])
+
+    with mds_tab:
+        mds_file = os.path.join(base_path, "MDS.png")
+        if os.path.exists(mds_file):
+            st.image(mds_file)
+            with st.expander("What does this plot mean?", expanded=False):
+                st.markdown(MDS_DESCRIPTION)
+        else:
+            st.info("The R pipeline wrote no MDS plot for this dataset.")
+
+    cpm_df = ri.cpm_data.get(selected_dataset)
+    if cpm_df is None:
+        msg = f"No CPM.csv was loaded for {selected_dataset}, so PCA and the clustering heatmap cannot be drawn."
+        with pca_tab:
+            st.error(msg)
+        with heatmap_tab:
+            st.error(msg)
+        return
+
+    try:
+        selection = top_variable_genes(cpm_df, DEFAULT_TOP_GENES)
+        samples = list(selection.matrix.columns)
+        group_labels = known_groups(None if groups is None else pd.Series(groups))
+        sample_groups = sample_group_series(samples, group_labels)
+        display = group_display(sample_groups.tolist())
+        titles = load_sample_titles(ri.results_dir, selected_dataset) if SINGLE_PLOTS_AVAILABLE else None
+    except Exception as e:
+        logger.exception(f"Sample structure failed for {selected_dataset}")
+        msg = f"Could not prepare the sample structure plots: {type(e).__name__}: {e}"
+        with pca_tab:
+            st.error(msg)
+        with heatmap_tab:
+            st.error(msg)
+        return
+    if group_labels is None:
+        st.warning(f"The groups of {selected_dataset} are not known, so the samples are not coloured by group.")
+
+    with pca_tab:
+        try:
+            pca = run_pca(selection.matrix)
+            pcs = list(pca.coords.columns)
+            pairs = [(a, b) for i, a in enumerate(pcs) for b in pcs[i + 1:]]
+            choice = st.radio(
+                "Components",
+                [f"{a} vs {b}" for a, b in pairs],
+                horizontal=True,
+                key=f"pca_components_{selected_dataset}",
+            )
+            x_pc, y_pc = choice.split(" vs ") if choice else pairs[0]
+            fig = create_pca_figure(pca, group_labels, display, titles, x_pc=x_pc, y_pc=y_pc)
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(structure_caption(selection, len(samples), display, "PCA of")
+                       + " Genes are centred, not scaled.")
+        except Exception as e:
+            logger.exception(f"PCA failed for {selected_dataset}")
+            st.error(f"Could not draw the PCA plot: {type(e).__name__}: {e}")
+
+    with heatmap_tab:
+        try:
+            fig = create_clustering_heatmap(selection, group_labels, display, titles)
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                structure_caption(selection, len(samples), display, "Clustering of")
+                + " Each gene is z-scored across samples (colour range ±3). Genes and samples are clustered "
+                "by complete linkage on Euclidean distance. Hover over a cell for the gene and sample, "
+                "or over the top bar for the sample's group."
+            )
+        except Exception as e:
+            logger.exception(f"Clustering heatmap failed for {selected_dataset}")
+            st.error(f"Could not draw the clustering heatmap: {type(e).__name__}: {e}")
+
+    if display.uses_codes or display.prefix:
+        with st.expander("Group key", expanded=display.uses_codes):
+            st.dataframe(display.key_table(sample_groups), hide_index=True, use_container_width=True)
 
 
 @log_streamlit_function
@@ -554,10 +635,6 @@ def _render_de_plot_tabs(ri: ResultsIntegrator, selected_dataset: str, selected_
     """Render differential expression plot tabs."""
     # Define plot information with descriptions
     contrast_plot_files = {
-        "Heatmap of Top DEGs": {
-            "file": os.path.join(contrast_path, "heatmap_top50.png"),
-            "description": "**Hierarchical clustering heatmap** showing the top 50 differentially expressed genes for this contrast.\n\n- **What to look for**: Distinct expression patterns that separate the experimental groups. Groups of co-regulated genes (clusters) may represent functional modules.\n\n- **Technical details**: Genes are clustered based on their expression similarity. Color intensity represents expression level (red = high, blue = low)."
-        },
         "MA Plot": {
             "file": os.path.join(contrast_path, "ma_plot.png"),
             "description": "**MA plot** showing the relationship between average expression level (x-axis) and log2 fold change (y-axis).\n\n- **What to look for**: Symmetrical distribution around y=0 with significant genes (red points) distributed across expression levels. Asymmetry might indicate normalisation issues.\n\n- **Technical details**: Each point represents a gene. M (y-axis) is the log-ratio of expression (log2 fold change), and A (x-axis) is the average expression. Red points are statistically significant DEGs."
@@ -571,7 +648,7 @@ def _render_de_plot_tabs(ri: ResultsIntegrator, selected_dataset: str, selected_
     }
 
     # Create tabs for the contrast-specific plots
-    de_plot_tabs = st.tabs(["Volcano Plot", "MA Plot", "Heatmap"])
+    de_plot_tabs = st.tabs(["Volcano Plot", "MA Plot"])
 
     # Tab 1: Volcano Plot
     with de_plot_tabs[0]:
@@ -580,10 +657,6 @@ def _render_de_plot_tabs(ri: ResultsIntegrator, selected_dataset: str, selected_
     # Tab 2: MA Plot
     with de_plot_tabs[1]:
         _render_ma_plot_tab(ri, selected_dataset, selected_contrast, contrast_plot_files)
-
-    # Tab 3: Heatmap
-    with de_plot_tabs[2]:
-        _render_heatmap_plot_tab(ri, selected_dataset, selected_contrast, contrast_path, contrast_plot_files, groups)
 
 
 @log_streamlit_function
@@ -641,37 +714,6 @@ def _render_ma_plot_tab(ri: ResultsIntegrator, selected_dataset: str, selected_c
             st.markdown(contrast_plot_files["MA Plot"]["description"])
     else:
         st.info("MA plot not available for this contrast.")
-
-
-@log_streamlit_function
-def _render_heatmap_plot_tab(ri: ResultsIntegrator, selected_dataset: str, selected_contrast: str,
-                           contrast_path: str, contrast_plot_files: Dict, groups: Optional[Dict]):
-    """Render heatmap plot tab."""
-    heatmap_fig = None
-    if (SINGLE_PLOTS_AVAILABLE and ri and
-        selected_dataset in ri.deg_data and
-        selected_contrast in ri.deg_data[selected_dataset] and
-        selected_dataset in ri.cpm_data):
-        try:
-            deg_df = ri.deg_data[selected_dataset][selected_contrast]
-            cpm_df = ri.cpm_data[selected_dataset]
-            titles = load_sample_titles(ri.results_dir, selected_dataset)
-            heatmap_fig = create_deg_heatmap(cpm_df, deg_df, groups, sample_titles=titles)
-        except Exception as e:
-            st.warning(f"Error creating interactive DEG heatmap: {e}")
-            heatmap_fig = None
-
-    if heatmap_fig is not None:
-        st.plotly_chart(heatmap_fig, use_container_width=True)
-        with st.expander("What does this plot mean?", expanded=True):
-            st.markdown(contrast_plot_files["Heatmap of Top DEGs"]["description"])
-    elif os.path.exists(contrast_plot_files["Heatmap of Top DEGs"]["file"]):
-        st.warning("Interactive heatmap unavailable; attempting to load static image as fallback.")
-        st.image(contrast_plot_files["Heatmap of Top DEGs"]["file"])
-        with st.expander("What does this plot mean?", expanded=True):
-            st.markdown(contrast_plot_files["Heatmap of Top DEGs"]["description"])
-    else:
-        st.info("Heatmap not available for this contrast.")
 
 
 @log_streamlit_function
