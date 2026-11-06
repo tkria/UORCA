@@ -1,0 +1,3 @@
+name,expression
+EGFP_pos_vs_EGFP_neg,CD45+F4/80+CD11b+EGFP+ - CD45+F4/80+CD11b+EGFP-
+EGFP_neg_vs_EGFP_pos,CD45+F4/80+CD11b+EGFP- - CD45+F4/80+CD11b+EGFP+

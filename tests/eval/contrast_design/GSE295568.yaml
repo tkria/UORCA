@@ -1,0 +1,181 @@
+# Expected design and contrasts for GSE295568. Schema: README.md in this folder.
+accession: GSE295568
+status: "draft — owner to confirm"
+drafted: "2026-10-27"
+drafted_by: "Claude agent, from the stored metadata; not reviewed by the owner"
+sources:
+  metadata: results/20261007_PPARg/GSE295568/metadata/GSE295568_metadata.csv
+  current_contrasts: results/20261007_PPARg/GSE295568/metadata/contrasts.csv
+  fixture: tests/fixtures/contrast_design/GSE295568_samples.csv
+research_question_assumed: >-
+  Which genes and pathways depend on PPARG activity? (Effects of losing,
+  inhibiting or restoring PPARG.)
+difficulty: difficult
+
+design:
+  # 44 samples, 22 conditions x 2 replicates, in 5 sub-experiments (batches).
+  group_columns: ["characteristics_ch1.3.treatment"]
+  # tissue, cell line and cell type have one level each; they must not be
+  # joined into the group labels (the 2026-10-07 run joined them).
+  single_level_columns: ["characteristics_ch1.0.tissue", "characteristics_ch1.1.cell line", "characteristics_ch1.2.cell type"]
+  required_blocks: []
+  must_drop:
+    - column: "characteristics_ch1.4.batch"
+      reason_code: group_nested_in_block
+      note: >-
+        Every group lies in exactly one batch (each batch is one
+        sub-experiment), so batch is a sum of group coefficients and cannot be
+        a covariate. The plan text calls this "batch nested in group"; the
+        crosstab shows the reverse direction (groups nested in batch).
+  expected_formula: "~0 + group"
+  expected_residual_df: 22
+  needs_review_expected: true
+
+groups:
+  # Labels follow the GEO sample titles. Comment: batch, n.
+  TSC_shPPARG:  # Batch1, n=2
+    characteristics_ch1.3.treatment: "TSCs were infected with PPARG KD1 shRNA lentivirus and maintained under self-renewal conditions."
+  TSC_shCtrl:  # Batch1, n=2
+    characteristics_ch1.3.treatment: "TSCs were infected with non-targeting control shRNA lentivirus and maintained under self-renewal conditions."
+  TSC_rescue_12p5:  # Batch1, n=2
+    characteristics_ch1.3.treatment: "TSCs were infected with PPARG KD1 shRNA lentivirus and post 72 hours shRNA-resistant PPARG was Dox-induced for 3 days, induced with 12.5 ng/mL Dox."
+  TSC_rescue_15:  # Batch1, n=2
+    characteristics_ch1.3.treatment: "TSCs were infected with PPARG KD1 shRNA lentivirus and post 72 hours shRNA-resistant PPARG was Dox-induced for 3 days, induced with 15 ng/mL Dox."
+  EVT_shPPARG_DLX6:  # Batch2, n=2
+    characteristics_ch1.3.treatment: "PPARG KD1 shRNA lentiviral infection was performed 3–20 h after EVT induction to achieve sustained PPARG knockdown during differentiation, and DLX6 overexpression was induced from day 1 of differentiation."
+  EVT_shPPARG:  # Batch2, n=2
+    characteristics_ch1.3.treatment: "PPARG KD1 shRNA lentiviral infection was performed 3–20 h after EVT induction to achieve sustained PPARG knockdown during differentiation."
+  EVT_shCtrl:  # Batch2, n=2
+    characteristics_ch1.3.treatment: "Cells were infected with non-targeting control shRNA lentivirus 3–20 h after EVT induction to control for shRNA delivery."
+  TSC_T007_0p3uM:  # Batch3, n=2
+    characteristics_ch1.3.treatment: "TSCs were treated with 0.3 μM T0070907 and maintained for 72 hours."
+  TSC_T007_1uM:  # Batch3, n=2
+    characteristics_ch1.3.treatment: "TSCs were treated with 1 μM T0070907 and maintained for 72 hours."
+  TSC_T007_3uM:  # Batch3, n=2
+    characteristics_ch1.3.treatment: "TSCs were treated with 3 μM T0070907 and maintained for 72 hours."
+  TSC_T007_10uM:  # Batch3, n=2
+    characteristics_ch1.3.treatment: "TSCs were treated with 10 μM T0070907 and maintained for 72 hours."
+  TSC_DMSO:  # Batch3, n=2
+    characteristics_ch1.3.treatment: "TSCs were treated with vehicle (DMSO) and maintained for 72 hours."
+  EVT_T007_D0:  # Batch4, n=2
+    characteristics_ch1.3.treatment: "Cells were treated with 1 μM T0070907 starting on day 0 of EVT differentiation and maintained until day 8."
+  EVT_T007_D1:  # Batch4, n=2
+    characteristics_ch1.3.treatment: "Cells were treated with 1 μM T0070907 starting on day 1 of EVT differentiation and maintained until day 8."
+  EVT_T007_D2:  # Batch4, n=2
+    characteristics_ch1.3.treatment: "Cells were treated with 1 μM T0070907 starting on day 2 of EVT differentiation and maintained until day 8."
+  EVT_T007_D3:  # Batch4, n=2
+    characteristics_ch1.3.treatment: "Cells were treated with 1 μM T0070907 starting on day 3 of EVT differentiation and maintained until day 8."
+  EVT_T007_D4:  # Batch4, n=2
+    characteristics_ch1.3.treatment: "Cells were treated with 1 μM T0070907 starting on day 4 of EVT differentiation and maintained until day 8."
+  EVT_T007_D6:  # Batch4, n=2
+    characteristics_ch1.3.treatment: "Cells were treated with 1 μM T0070907 starting on day 6 of EVT differentiation and maintained until day 8."
+  EVT_DMSO:  # Batch4, n=2
+    characteristics_ch1.3.treatment: "Cells were differentiated into EVT for 8 days with DMSO (vehicle control)."
+  EVT_SCH772984:  # Batch5, n=2
+    characteristics_ch1.3.treatment: "Cells were treated with 0.5 μM SCH772984 from day 1 to day 8 of EVT differentiation."
+  EVT_DMOG:  # Batch5, n=2
+    characteristics_ch1.3.treatment: "Cells were treated with 500 μM DMOG from day 3 to day 8 of EVT differentiation."
+  EVT_untreated:  # Batch5, n=2
+    characteristics_ch1.3.treatment: "Cells were differentiated into EVTs for 8 days under control (untreated) conditions."
+
+contrasts:
+  # contrast_type: objective, from the list in README.md.
+  # show_by_default + reason: tied to the assumed PPARG question.
+  required:
+    # Batch1: TSC knockdown and PPARG rescue
+    - {target: [TSC_shPPARG], reference: [TSC_shCtrl], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "PPARG knockdown in TSCs directly shows which genes need PPARG."}
+    - {target: [TSC_rescue_12p5], reference: [TSC_shPPARG], contrast_type: rescue_vs_perturbation, show_by_default: true,
+       rule: owner-default 2026-10-28,
+       reason: "Shows whether restoring PPARG (12.5 ng/mL Dox) reverses the knockdown effects."}
+    - {target: [TSC_rescue_15], reference: [TSC_shPPARG], contrast_type: rescue_vs_perturbation, show_by_default: true,
+       rule: owner-default 2026-10-28,
+       reason: "Shows whether restoring PPARG (15 ng/mL Dox) reverses the knockdown effects."}
+    - {target: [TSC_rescue_12p5], reference: [TSC_shCtrl], contrast_type: rescue_vs_control, show_by_default: false,
+       rule: owner-default 2026-10-28,
+       reason: "Tests whether the 12.5 ng/mL rescue is complete; context for the rescue, not the main PPARG effect."}
+    - {target: [TSC_rescue_15], reference: [TSC_shCtrl], contrast_type: rescue_vs_control, show_by_default: false,
+       rule: owner-default 2026-10-28,
+       reason: "Tests whether the 15 ng/mL rescue is complete; context for the rescue, not the main PPARG effect."}
+    # Batch2: EVT knockdown and DLX6 rescue
+    - {target: [EVT_shPPARG], reference: [EVT_shCtrl], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "PPARG knockdown during EVT differentiation directly shows which genes need PPARG there."}
+    - {target: [EVT_shPPARG_DLX6], reference: [EVT_shPPARG], contrast_type: rescue_vs_perturbation, show_by_default: true,
+       rule: owner-default 2026-10-28,
+       reason: "Owner (Q4b): shows whether DLX6 overexpression rescues the PPARG-knockdown effects in EVTs."}
+    # Batch3: TSC PPARG antagonist doses (show_by_default is a draft)
+    - {target: [TSC_T007_0p3uM], reference: [TSC_DMSO], contrast_type: dose_vs_control, show_by_default: true,
+       reason: "Pharmacological PPARG inhibition (0.3 uM T0070907) in TSCs."}
+    - {target: [TSC_T007_1uM], reference: [TSC_DMSO], contrast_type: dose_vs_control, show_by_default: true,
+       reason: "Pharmacological PPARG inhibition (1 uM T0070907) in TSCs."}
+    - {target: [TSC_T007_3uM], reference: [TSC_DMSO], contrast_type: dose_vs_control, show_by_default: true,
+       reason: "Pharmacological PPARG inhibition (3 uM T0070907) in TSCs."}
+    - {target: [TSC_T007_10uM], reference: [TSC_DMSO], contrast_type: dose_vs_control, show_by_default: true,
+       reason: "Pharmacological PPARG inhibition (10 uM T0070907) in TSCs."}
+    # Batch4: EVT PPARG antagonist by start day (show_by_default is a draft)
+    - {target: [EVT_T007_D0], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: true,
+       reason: "PPARG inhibition over the whole EVT differentiation (from day 0)."}
+    - {target: [EVT_T007_D1], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 1); refines the timing of the PPARG requirement shown by day 0."}
+    - {target: [EVT_T007_D2], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 2); refines the timing of the PPARG requirement shown by day 0."}
+    - {target: [EVT_T007_D3], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 3); refines the timing of the PPARG requirement shown by day 0."}
+    - {target: [EVT_T007_D4], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 4); refines the timing of the PPARG requirement shown by day 0."}
+    - {target: [EVT_T007_D6], reference: [EVT_DMSO], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Later start (day 6); refines the timing of the PPARG requirement shown by day 0."}
+  optional:
+    # Acceptable when present.
+    - {target: [EVT_shPPARG_DLX6], reference: [EVT_shCtrl], contrast_type: rescue_vs_control, show_by_default: false,
+       rule: owner-default 2026-10-28,
+       reason: "Tests whether the DLX6 rescue is complete; context for the rescue."}
+    - {target: [EVT_SCH772984], reference: [EVT_untreated], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "ERK inhibition; not a PPARG perturbation."}
+    - {target: [EVT_DMOG], reference: [EVT_untreated], contrast_type: perturbation_vs_control, show_by_default: false,
+       reason: "Hypoxia mimetic; not a PPARG perturbation."}
+    - {target: [TSC_T007_0p3uM, TSC_T007_1uM, TSC_T007_3uM, TSC_T007_10uM], reference: [TSC_DMSO], contrast_type: average,
+       show_by_default: false, reason: "Pooled PPARG inhibition across doses; the per-dose contrasts are shown instead."}
+  not_shown_by_default:
+    # May exist, but show_by_default must be false.
+    - {target: [TSC_rescue_12p5], reference: [TSC_rescue_15], contrast_type: dose_vs_dose,
+       reason: "Dose vs dose of the rescue; does not show a PPARG effect. Produced by the 2026-10-07 run."}
+    - {any_pair_within: [TSC_T007_0p3uM, TSC_T007_1uM, TSC_T007_3uM, TSC_T007_10uM], contrast_type: dose_vs_dose,
+       reason: "Dose vs dose of the same antagonist."}
+    - {any_pair_within: [EVT_T007_D0, EVT_T007_D1, EVT_T007_D2, EVT_T007_D3, EVT_T007_D4, EVT_T007_D6], contrast_type: other,
+       reason: "Start day vs start day of the same antagonist."}
+  must_be_absent:
+    - rule: no_cross_block
+      block: "characteristics_ch1.4.batch"
+      note: >-
+        A contrast between groups in different batches compares batches too
+        (for example EVT_DMSO vs EVT_untreated, or EVT_shPPARG vs EVT_DMSO).
+
+current_run:
+  # What the 2026-10-07 run produced, for the "before" score.
+  formula: "~0 + experimental_group"
+  n_groups: 22
+  group_labels: "tissue_cell line_cell type_treatment joined with '_'"
+  contrasts: 17
+  required_present: 13  # of 17 required
+  required_missing:
+    - TSC_rescue_12p5 - TSC_shPPARG
+    - TSC_rescue_15 - TSC_shPPARG
+    - TSC_rescue_12p5 - TSC_shCtrl
+    - TSC_rescue_15 - TSC_shCtrl
+  not_shown_by_default_present: ["TSC_rescue_12p5 - TSC_rescue_15"]
+  note: >-
+    The 13 present are TSC_shPPARG-TSC_shCtrl, EVT_shPPARG-EVT_shCtrl,
+    EVT_shPPARG_DLX6-EVT_shPPARG, the 4 TSC doses vs TSC_DMSO and the 6 EVT
+    start days vs EVT_DMSO. The run also produced the 4-dose average and
+    SCH772984 and DMOG vs EVT_untreated. No contrast crosses a batch.
+
+owner_answers:  # 2026-10-28
+  Q4b: "EVTd8_shPPARG_DLX6Rescue is a rescue arm: DLX6Rescue vs EVT shPPARG, rescue_vs_perturbation, shown by default."
+  Q5: "Replaced by a rule (owner-default 2026-10-28): rescue vs perturbation is shown by default; rescue vs control is in the key with show_by_default false."
+  Q6: "A group with exactly 2 replicates raises a medium review flag (system rule)."
+  Q7b: "Roles replaced by show_by_default + reason and an objective contrast_type."
+
+owner_to_confirm:
+  - "show_by_default for the T0070907 dose contrasts (drafted true) and the start-day contrasts (drafted: day 0 true, later days false)."
+  - "Wording: the plan says batch is nested in group; the data show each group nested in one batch. The consequence (batch cannot be a covariate) is the same."

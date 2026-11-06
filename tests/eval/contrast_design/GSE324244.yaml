@@ -1,0 +1,50 @@
+# Expected design and contrasts for GSE324244. Schema: README.md in this folder.
+accession: GSE324244
+status: "draft — owner to confirm"
+drafted: "2026-10-27"
+drafted_by: "Claude agent, from the stored metadata; not reviewed by the owner"
+sources:
+  metadata: results/20261007_PPARg/GSE324244/metadata/GSE324244_metadata.csv
+  current_contrasts: results/20261007_PPARg/GSE324244/metadata/contrasts.csv
+  fixture: tests/fixtures/contrast_design/GSE324244_samples.csv
+research_question_assumed: >-
+  Which genes and pathways depend on PPARG activity? (Effects of losing,
+  inhibiting or restoring PPARG.)
+difficulty: simple
+
+design:
+  # Tissue and diet (treatment) are constant. 3 knockout vs 4 wild type.
+  group_columns: ["characteristics_ch1.1.genotype"]
+  required_blocks: []
+  expected_formula: "~0 + group"
+  expected_residual_df: 5
+  needs_review_expected: false
+
+groups:
+  B4galt1_HKO:
+    characteristics_ch1.1.genotype: "B4galt1-HKO"
+  WT:
+    characteristics_ch1.1.genotype: "WT"
+
+contrasts:
+  required:
+    # B4galt1-HKO (assumed hepatocyte-specific knockout) vs wild type, both on CDAHFD for 15 weeks. The paper links B4GALT1 to the PPARG/ACSL4 axis, so this is indirect evidence on PPARG.
+    - {target: [B4galt1_HKO], reference: [WT], contrast_type: perturbation_vs_control, show_by_default: false,
+       rule: owner 2026-10-28,
+       reason: "The paper links B4GALT1 to PPARG only through the PPARG/ACSL4 axis in MASLD liver, so this knockout is a distant readout of PPARG-dependent genes."}
+  optional: []
+  not_shown_by_default: []
+  must_be_absent: []
+
+current_run:
+  formula: "~0 + genotype"
+  contrasts: 1
+  required_present: 1  # of 1
+  required_missing: []
+
+owner_answers:  # 2026-10-28
+  Q7b: "Roles replaced by show_by_default + reason and an objective contrast_type."
+  Q7c: "show_by_default false for this dataset."
+
+owner_to_confirm:
+  - "No other contrast is expected; confirm."
