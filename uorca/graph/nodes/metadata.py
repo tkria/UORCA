@@ -9,6 +9,17 @@ from typing import TYPE_CHECKING, Union
 
 from pydantic_graph import BaseNode, GraphRunContext
 
+from uorca.core.design_validation import r_make_names
+from uorca.core.naming import (
+    R_GROUP_COLUMN,
+    NamingError,
+    assign_level_names,
+    check_joined_levels,
+    is_missing_value,
+    legacy_r_naming_hazards,
+    missing_group_signals,
+)
+
 from ..agents import metadata_analysis_agent
 from ..deps import WorkflowDeps
 from ..state import CheckpointStatus, WorkflowState
@@ -44,8 +55,9 @@ class MetadataAnalysisNode(BaseNode[WorkflowState, WorkflowDeps, str]):
                 reflection_context = "\nPrevious analysis attempts and feedback:\n"
                 reflection_context += "\n".join(ctx.state.reflections[-2:])
 
-            # Prepare analysis columns (remove GEO ID columns)
-            id_cols = ["GSM", "SRX", "SRR", "geo_accession"]
+            # Prepare analysis columns (remove GEO ID columns and the R name
+            # column a previous attempt may have added)
+            id_cols = ["GSM", "SRX", "SRR", "geo_accession", R_GROUP_COLUMN]
             analysis_cols = [c for c in df.columns if c not in id_cols]
 
             prompt = f"""Analyse this RNA-seq metadata for differential expression grouping.
@@ -76,8 +88,19 @@ Research question: {ctx.state.research_question or 'General exploratory analysis
                     f"Available columns: {list(df.columns)}"
                 )
 
+            if R_GROUP_COLUMN in (ctx.state.merged_column, *result.output.selected_columns):
+                raise ValueError(
+                    f"{R_GROUP_COLUMN!r} is reserved for the R level names; choose "
+                    "metadata columns and a merged column name other than it."
+                )
+
             # Apply column creation/renaming
             if len(result.output.selected_columns) > 1:
+                # Joining with "_" can merge different groups (a_b + c and
+                # a + b_c); refuse before the merge hides it.
+                check_joined_levels(
+                    df[result.output.selected_columns].astype(str).itertuples(index=False)
+                )
                 # Multiple columns: merge them into a new column
                 df[ctx.state.merged_column] = (
                     df[result.output.selected_columns].astype(str).agg("_".join, axis=1)
@@ -87,13 +110,20 @@ Research question: {ctx.state.research_question or 'General exploratory analysis
                 df[ctx.state.merged_column] = df[result.output.selected_columns[0]]
             # else: single column with same name - column already exists, no action needed
 
+            # Missing or empty group values: warn and flag for review, or stop
+            # (one switch, naming.MISSING_GROUP_POLICY; owner question Q13).
+            selected = list(result.output.selected_columns)
+            ctx.state.review_signals = missing_group_signals(
+                df[selected].itertuples(index=False), selected
+            )
+
             # Normalise merged_column to an R-safe identifier. R's read.csv with
             # default check.names=TRUE rewrites a header like "disease state" to
             # "disease.state", which then no longer matches the merged_column
             # string passed to RNAseq.R as a CLI arg.
-            safe_name = re.sub(r"[^A-Za-z0-9_.]", "_", ctx.state.merged_column)
-            if safe_name and safe_name[0].isdigit():
-                safe_name = "X" + safe_name
+            # r_make_names also covers a leading "_" or "." + digit and
+            # reserved words, which read.csv renames too (F20).
+            safe_name = r_make_names(re.sub(r"[^A-Za-z0-9_.]", "_", ctx.state.merged_column))
             if safe_name != ctx.state.merged_column:
                 logger.info(
                     "Sanitised merged_column for R: %r → %r",
@@ -102,6 +132,11 @@ Research question: {ctx.state.research_question or 'General exploratory analysis
                 )
                 df.rename(columns={ctx.state.merged_column: safe_name}, inplace=True)
                 ctx.state.merged_column = safe_name
+
+            # An empty or blank label is a missing value, not a group named ""
+            # (which R would call "X").
+            merged = df[ctx.state.merged_column]
+            df[ctx.state.merged_column] = merged.mask(merged.map(is_missing_value))
 
             # CRITICAL: Save modified dataframe back to state
             ctx.state.metadata_df = df
@@ -122,6 +157,21 @@ Research question: {ctx.state.research_question or 'General exploratory analysis
                     f"Need at least 2 groups for DE analysis, found: {ctx.state.unique_groups}"
                 )
 
+            # Give every level a valid, unique R name now, before Kallisto, so
+            # RNAseq.R renames nothing (renaming audit 2026-10-28, Q4).
+            raw_levels = [str(g) for g in actual_groups]
+            for hazard in legacy_r_naming_hazards(raw_levels):
+                logger.info("R make.names hazard avoided: %s", hazard)
+            level_names = assign_level_names(raw_levels)
+            df[R_GROUP_COLUMN] = df[ctx.state.merged_column].map(
+                lambda v: level_names[str(v)]
+            )
+            ctx.state.metadata_df = df
+            ctx.state.r_group_column = R_GROUP_COLUMN
+            ctx.state.group_level_names = level_names
+            ctx.state.group_source_columns = list(result.output.selected_columns)
+            logger.info("R level names: %s", level_names)
+
             ctx.state.update_checkpoint("metadata_analysis", CheckpointStatus.COMPLETED)
             return ContrastDesignNode()
 
@@ -133,6 +183,7 @@ Research question: {ctx.state.research_question or 'General exploratory analysis
                     "node": "MetadataAnalysisNode",
                     "error": str(e),
                     "checkpoint": "metadata_analysis",
+                    "error_type": "naming" if isinstance(e, NamingError) else "other",
                 }
             )
             return ReflectNode(failed_checkpoint="metadata_analysis")

@@ -3,9 +3,10 @@
 from typing import Any, Type, TypeVar
 
 from pydantic import BaseModel
-from pydantic_ai import Agent, ModelRetry
+from pydantic_ai import Agent, ModelRetry, RunContext
 
 from uorca.ai_provider import get_model
+from uorca.core.naming import contrast_design_issues, contrast_name_issues
 
 from .deps import WorkflowDeps
 from .models import (
@@ -201,16 +202,28 @@ def validate_fastq_links(
     return output
 
 
-# === Output validator for contrasts (example of self-correction) ===
+# === Output validator for contrasts ===
 @contrast_design_agent.output_validator
-def validate_contrasts(ctx: Any, output: ContrastsOut) -> ContrastsOut:
-    """Ensure contrasts are properly formed."""
-    for contrast in output.contrasts:
-        if " - " not in contrast.expression and "vs" not in contrast.name.lower():
-            raise ModelRetry(
-                "Each contrast must represent a comparison. "
-                "Ensure expression uses ' - ' for subtraction (e.g., 'groupA - groupB')"
-            )
+def validate_contrasts(ctx: RunContext[WorkflowDeps], output: ContrastsOut) -> ContrastsOut:
+    """Reject contrasts that RNAseq.R would fail on or misread.
+
+    Deterministic checks (renaming audit 2026-10-28, Q1 and Q2): names must be
+    valid R names that are also safe folder names, unique ignoring case;
+    expressions must use only the R level names and form a comparison. A
+    failure asks the model to fix the design before Kallisto runs.
+    """
+    contrasts = [{"name": c.name, "expression": c.expression} for c in output.contrasts]
+    level_names = ctx.deps.group_level_names
+    if level_names:
+        issues = contrast_design_issues(contrasts, level_names)
+    else:
+        issues = contrast_name_issues([c["name"] for c in contrasts])
+    ctx.deps.contrast_issues = issues or None
+    if issues:
+        raise ModelRetry(
+            "Fix these contrast problems and return the full contrast list again:\n- "
+            + "\n- ".join(issues)
+        )
     return output
 
 

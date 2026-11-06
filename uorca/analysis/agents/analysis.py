@@ -1656,6 +1656,31 @@ Find the pattern to match Kallisto names to metadata. Consider:
     )
 
 
+def _check_contrast_manifest(analysis_dir: str, contrast_names: List[str]) -> None:
+    """Raise unless RNAseq.R wrote a DEG.csv for every requested contrast.
+
+    RNAseq.R lists what it wrote in ``RNAseqAnalysis/contrast_manifest.csv``.
+    A contrast missing from it, or whose folder has no DEG.csv, would vanish
+    from the explorer without a message.
+    """
+    manifest_path = os.path.join(analysis_dir, "contrast_manifest.csv")
+    if not os.path.isfile(manifest_path):
+        raise RuntimeError(f"RNAseq.R did not write {manifest_path}")
+    manifest = pd.read_csv(manifest_path, dtype=str, keep_default_na=False)
+    written = dict(zip(manifest["contrast_name"], manifest["folder"]))
+    missing = [n for n in contrast_names if n not in written]
+    no_file = [
+        n for n in contrast_names
+        if n in written and not os.path.isfile(os.path.join(analysis_dir, written[n], "DEG.csv"))
+    ]
+    if missing or no_file:
+        raise RuntimeError(
+            f"RNAseq.R did not produce results for every contrast. Missing from "
+            f"the manifest: {missing}; listed without DEG.csv: {no_file}."
+        )
+    logger.info("Contrast manifest matches the %d requested contrasts", len(contrast_names))
+
+
 async def run_edger_limma_analysis_core(
     sample_mapping_path: Optional[str],
     merged_column: Optional[str],
@@ -1748,6 +1773,9 @@ async def run_edger_limma_analysis_core(
 
     if not os.path.exists(analysis_dir):
         raise RuntimeError(f"Analysis directory not created at {analysis_dir}")
+
+    if contrasts:
+        _check_contrast_manifest(analysis_dir, [str(c["name"]) for c in contrasts])
 
     logger.info("edgeR/limma analysis completed. Results at %s", analysis_dir)
 

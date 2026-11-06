@@ -70,3 +70,15 @@ def test_patch_rnaseq_template_raises_when_template_missing(monkeypatch):
 
     with pytest.raises(FileNotFoundError, match="RNAseq.R"):
         helpers._patch_rnaseq_template(group_col="Group", use_contrasts=False)
+
+
+@pytest.mark.unit
+def test_patch_rnaseq_template_replaces_the_argument_block():
+    """The bundle patch must replace RNAseq.R's commandArgs block in place.
+
+    If the block's text changes, the patch falls back to inserting fixed values
+    at the top, and the unchanged block later overwrites them with NA.
+    """
+    patched = _patch_rnaseq_template(group_col="Group", use_contrasts=True)
+    assert "commandArgs(trailingOnly = TRUE)" not in patched
+    assert 'contrasts_file <- "metadata/contrasts.csv"' in patched

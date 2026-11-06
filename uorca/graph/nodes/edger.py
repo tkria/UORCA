@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Union
 
 from pydantic_graph import BaseNode, GraphRunContext
 
+from uorca.core.naming import NamingError, contrast_weights
+
 from ..deps import WorkflowDeps
 from ..state import CheckpointStatus, WorkflowState
 
@@ -77,9 +79,17 @@ class RunDEAnalysisNode(BaseNode[WorkflowState, WorkflowDeps, str]):
         ctx.state.update_checkpoint("de_analysis", CheckpointStatus.IN_PROGRESS)
 
         try:
+            if not ctx.state.r_group_column or not ctx.state.group_level_names:
+                raise ValueError(
+                    "Group level R names are missing; MetadataAnalysisNode must run first."
+                )
+            # The contrasts were checked at design time; check again in case a
+            # retry changed state in between, so R never sees a bad design.
+            contrast_weights(ctx.state.contrasts or [], ctx.state.group_level_names)
+
             de_result = await run_edger_limma_analysis_core(
                 sample_mapping_path=ctx.state.sample_mapping_path,
-                merged_column=ctx.state.merged_column,
+                merged_column=ctx.state.r_group_column,
                 contrasts=ctx.state.contrasts,
                 tx2gene_path=ctx.state.tx2gene_file_used,
                 output_dir=ctx.deps.output_dir,
@@ -100,6 +110,7 @@ class RunDEAnalysisNode(BaseNode[WorkflowState, WorkflowDeps, str]):
                     "node": "RunDEAnalysisNode",
                     "error": str(e),
                     "checkpoint": "de_analysis",
+                    "error_type": "naming" if isinstance(e, NamingError) else "other",
                 }
             )
             return ReflectNode(failed_checkpoint="de_analysis")
