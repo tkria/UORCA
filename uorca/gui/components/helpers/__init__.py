@@ -240,19 +240,24 @@ def add_directory_to_zip(zip_file: zipfile.ZipFile, source_dir: str, archive_dir
         zip_file: ZipFile object to add files to
         source_dir: Source directory path
         archive_dir: Directory name in the archive
+
+    Raises ValueError if a file in it resolves (through a symlink) to a path outside
+    ``source_dir``; read errors propagate.
     """
     if not os.path.exists(source_dir):
         logger.warning(f"Directory not found: {source_dir}")
         return
-    
+
+    root_resolved = Path(source_dir).resolve()
     for root, dirs, files in os.walk(source_dir):
         for file in files:
             file_path = os.path.join(root, file)
+            if not Path(file_path).resolve().is_relative_to(root_resolved):
+                raise ValueError(
+                    f"{file_path} points outside {source_dir}; refusing to add it to the package."
+                )
             arcname = os.path.join(archive_dir, os.path.relpath(file_path, source_dir))
-            try:
-                zip_file.write(file_path, arcname)
-            except Exception as e:
-                logger.warning(f"Could not add {file_path} to archive: {e}")
+            zip_file.write(file_path, arcname)
 
 
 # ----- R script packaging helpers (centralized) -----
@@ -313,17 +318,48 @@ def _load_sample_mapping(results_dir: str, dataset_id: str) -> Optional[pd.DataF
         return pd.read_csv(f)
 
 
-def _ensure_absolute_abundance_paths(df: pd.DataFrame, results_dir: str, dataset_id: str) -> pd.DataFrame:
-    df = df.copy()
-    if "abundance_file" not in df.columns:
-        return df
-    base = Path(results_dir) / dataset_id
-    newvals: List[str] = []
-    for val in df["abundance_file"].astype(str).tolist():
-        p = Path(val)
-        newvals.append(str(p if p.is_absolute() else (base / p).resolve()))
-    df["abundance_file"] = newvals
-    return df
+def _dataset_dir(results_dir: str, dataset_id: str) -> Path:
+    """The resolved folder of ``dataset_id``, which must be a folder inside ``results_dir``.
+
+    An empty id, ``.``, ``..`` or a traversal would otherwise make the package read the
+    results folder itself, or the process working directory.
+    """
+    root = Path(results_dir).resolve()
+    dataset_dir = (root / str(dataset_id)).resolve() if str(dataset_id).strip() else root
+    if dataset_dir == root or not dataset_dir.is_relative_to(root):
+        raise ValueError(
+            f"Dataset id {dataset_id!r} does not name a dataset folder inside {results_dir}."
+        )
+    return dataset_dir
+
+
+def _resolve_abundance_file(value: Any, dataset_dir: Path, sample: str) -> Path:
+    """Map one ``abundance_file`` value to an existing abundance.tsv inside ``dataset_dir``.
+
+    ``dataset_dir`` must already be resolved. Stored values are usually container paths
+    (``/UORCA_results/<id>/abundance/<run>/abundance.tsv``) that do not exist on this machine,
+    so the dataset's own ``abundance/<run>/abundance.tsv`` is tried after the stored path.
+    Only a regular file named abundance.tsv whose resolved path is inside ``dataset_dir`` is
+    accepted; anything else raises.
+    """
+    text = "" if value is None or pd.isna(value) else str(value).strip()
+    if not text or text.lower() == "nan":
+        raise ValueError(
+            f"Sample {sample} has an empty abundance_file in edger_analysis_samples.csv; "
+            "the R script package cannot be built."
+        )
+    stored = Path(text)
+    candidates = [stored if stored.is_absolute() else dataset_dir / stored]
+    if stored.name == "abundance.tsv" and stored.parent.name not in ("", ".", ".."):
+        candidates.append(dataset_dir / "abundance" / stored.parent.name / "abundance.tsv")
+    for cand in candidates:
+        resolved = cand.resolve()
+        if resolved.name == "abundance.tsv" and resolved.is_file() and resolved.is_relative_to(dataset_dir):
+            return resolved
+    raise FileNotFoundError(
+        f"Sample {sample}: abundance_file {text!r} is not an abundance.tsv inside {dataset_dir} "
+        f"(looked for {', '.join(str(c) for c in candidates)}); the R script package cannot be built."
+    )
 
 
 def _synthesize_contrasts_from_info(info: Optional[Dict[str, Any]]) -> Optional[pd.DataFrame]:
@@ -342,12 +378,6 @@ def _synthesize_contrasts_from_info(info: Optional[Dict[str, Any]]) -> Optional[
     except Exception:
         return None
     return None
-
-
-def _iter_files(dir_path: Path):
-    for root, _, files in os.walk(dir_path):
-        for fn in files:
-            yield Path(root) / fn
 
 
 def _patch_rnaseq_template(group_col: str, use_contrasts: bool) -> str:
@@ -389,22 +419,19 @@ def add_rscript_bundle_to_zip(
 ):
     """Add a self-contained RNAseq.R and required files into the existing zip under zip_root.
 
-    - Ensures abundance/ is included
+    - Adds each sample's abundance.tsv (only files inside the dataset folder; raises otherwise)
     - Writes metadata/edger_analysis_samples.csv with relative abundance paths
     - Includes metadata/analysis_info.json, metadata/contrasts.csv (or synthesizes)
     - Includes t2g.txt when available
     - Writes RNAseq.R patched with embedded parameters
     """
-    dataset_path = Path(results_dir) / dataset_id
+    dataset_path = _dataset_dir(results_dir, dataset_id)
     info = _load_analysis_info(results_dir, dataset_id)
 
     # Include analysis_info.json if present
     if info is not None:
         import json
-        try:
-            zf.writestr(f"{zip_root}/metadata/analysis_info.json", json.dumps(info, indent=2))
-        except Exception:
-            pass
+        zf.writestr(f"{zip_root}/metadata/analysis_info.json", json.dumps(info, indent=2))
 
     # Sample mapping
     sample_df = _load_sample_mapping(results_dir, dataset_id)
@@ -418,47 +445,39 @@ def add_rscript_bundle_to_zip(
                 if tsv.exists():
                     rows.append({
                         "sample": sub.name,
-                        "abundance_file": str(tsv.resolve()),
+                        "abundance_file": f"abundance/{sub.name}/abundance.tsv",
                         "Group": sub.name.split("_")[0] if "_" in sub.name else "Group1",
                     })
         if not rows:
-            return
+            raise FileNotFoundError(
+                f"{dataset_id} has no edger_analysis_samples.csv and no abundance/<sample>/abundance.tsv "
+                "files; the R script package cannot be built."
+            )
         sample_df = pd.DataFrame(rows)
 
-    # Ensure absolute paths for abundance_file
-    sample_df = _ensure_absolute_abundance_paths(sample_df, results_dir, dataset_id)
+    if "abundance_file" not in sample_df.columns:
+        raise ValueError(
+            f"edger_analysis_samples.csv for {dataset_id} has no abundance_file column; "
+            "the R script package cannot be built."
+        )
 
-    # Copy abundance directory using same helper as package
-    abund_dir = dataset_path / "abundance"
-    if abund_dir.exists():
-        add_directory_to_zip(zf, str(abund_dir), f"{zip_root}/abundance")
-        new_paths: List[str] = []
-        for _, row in sample_df.iterrows():
-            abspath = Path(str(row.get("abundance_file", "")))
-            sample_dir = abspath.parent.name if abspath.parent.name else None
-            relp = f"abundance/{sample_dir or 'UNKNOWN'}/abundance.tsv"
-            new_paths.append(relp)
-        if new_paths:
-            sample_df["abundance_file"] = new_paths
-    else:
-        # Fallback: copy from each abundance_file parent
-        new_paths: List[str] = []
-        for _, row in sample_df.iterrows():
-            abspath = Path(str(row.get("abundance_file", "")))
-            src_dir = abspath.parent
-            if src_dir.exists():
-                for p in _iter_files(src_dir):
-                    arcname = Path(zip_root) / "abundance" / src_dir.name / p.relative_to(src_dir)
-                    try:
-                        with open(p, 'rb') as f:
-                            zf.writestr(str(arcname), f.read())
-                    except Exception:
-                        pass
-                new_paths.append(f"abundance/{src_dir.name}/abundance.tsv")
-            else:
-                new_paths.append("abundance/UNKNOWN/abundance.tsv")
-        if new_paths:
-            sample_df["abundance_file"] = new_paths
+    # Resolve every sample's file first, so nothing is written when any of them is bad.
+    resolved_files: List[Path] = []
+    for idx, row in sample_df.iterrows():
+        label = str(row["sample"]) if "sample" in sample_df.columns else str(idx)
+        resolved_files.append(_resolve_abundance_file(row["abundance_file"], dataset_path, label))
+
+    # Copy only the abundance.tsv files, unless the abundance component already added them.
+    existing = set(zf.namelist())
+    new_paths: List[str] = []
+    for src in resolved_files:
+        rel = src.relative_to(dataset_path).as_posix()
+        arcname = f"{zip_root}/{rel}"
+        if arcname not in existing:
+            zf.write(src, arcname)
+            existing.add(arcname)
+        new_paths.append(rel)
+    sample_df["abundance_file"] = new_paths
 
     # Write sample mapping CSV into zip
     zf.writestr(f"{zip_root}/metadata/edger_analysis_samples.csv", sample_df.to_csv(index=False))
@@ -597,7 +616,7 @@ def create_dataset_download_package(
         
         with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
             package_name = f"{dataset_accession}_analysis_package"
-            dataset_path = os.path.join(results_dir, dataset_id)
+            dataset_path = str(_dataset_dir(results_dir, dataset_id))
             
             # 1. Add metadata files (if selected) - only GSE_metadata.csv and contrasts.csv
             if components.get('metadata', True):
@@ -614,9 +633,9 @@ def create_dataset_download_package(
                             with open(file_path, 'rb') as f:
                                 zf.writestr(f"{package_name}/metadata/{filename}", f.read())
             
-            # 2. Add abundance directory (if selected and exists)
-            #    Skip here if R script is requested (it will add abundance to avoid duplicates)
-            if components.get('abundance', True) and not components.get('r_script', False):
+            # 2. Add abundance directory (if selected and exists). The R script bundle then adds
+            #    only the per-sample abundance.tsv files that are not already in the zip.
+            if components.get('abundance', True):
                 abundance_dir = os.path.join(dataset_path, "abundance")
                 if os.path.exists(abundance_dir):
                     add_directory_to_zip(zf, abundance_dir, f"{package_name}/abundance")
@@ -639,18 +658,16 @@ def create_dataset_download_package(
                     zf.writestr(f"{package_name}/DEG_analysis/CPM_data.csv", cpm_csv)
             
             # 5. Add R script bundle (if selected): also ensures edger_analysis_samples.csv and abundance are in place
+            #    Any failure propagates to the handler below, which shows it with st.error.
             if components.get('r_script', False):
-                try:
-                    add_rscript_bundle_to_zip(
-                        zf=zf,
-                        ri=ri,
-                        results_dir=results_dir,
-                        dataset_id=dataset_id,
-                        dataset_accession=dataset_accession,
-                        zip_root=package_name,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to add R script bundle: {e}")
+                add_rscript_bundle_to_zip(
+                    zf=zf,
+                    ri=ri,
+                    results_dir=results_dir,
+                    dataset_id=dataset_id,
+                    dataset_accession=dataset_accession,
+                    zip_root=package_name,
+                )
 
             if package_warnings:
                 # The Analyses tab shows this file's content after the build.
